@@ -1,0 +1,53 @@
+# ── Python / Django ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.sqlite3
+*.db
+*.log
+*.pot
+*.pyc
+.env
+.venv
+venv/
+env/
+
+# Django migrations (keep __init__.py, ignore nothing — migrations are committed)
+# Uncomment below if you want to exclude migrations:
+# BEOAppBackEnd/api/migrations/
+
+# ── React Native / Expo ───────────────────────────────────────────────────────
+node_modules/
+.expo/
+dist/
+web-build/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+.env*
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+*.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# ── Editor ────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+inspect_items.py
+/tmp/
