@@ -1,116 +1,234 @@
 import React, { useState } from 'react';
-import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet, SafeAreaView,
-  KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
-} from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, Text, View } from 'react-native';
+import { MotiView, AnimatePresence } from 'moti';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Mail, Lock, User as UserIcon, Building2, ArrowLeft, ArrowRight, Sparkles } from 'lucide-react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../../App';
-import { useAuth } from '../auth/AuthContext';
 
-const INDIGO = '#4F46E5';
-const GRAY   = '#6B7280';
+import { Screen } from '@/components/ui/Screen';
+import { Input } from '@/components/ui/Input';
+import { Button } from '@/components/ui/Button';
+import { useToast } from '@/components/ui/Toast';
+import { useAuth } from '@/auth/AuthContext';
+import { cn } from '@/lib/cn';
+import type { UserRole } from '@/lib/types';
+import type { RootStackParamList } from '../../App';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Register'>;
 
-export default function RegisterScreen({ navigation }: Props) {
-  const { signUp } = useAuth();
-  const [name,     setName]     = useState('');
-  const [email,    setEmail]    = useState('');
-  const [password, setPassword] = useState('');
-  const [busy,     setBusy]     = useState(false);
+interface RoleCardProps {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  active: boolean;
+  onPress: () => void;
+}
 
-  const submit = async () => {
-    if (!email || !password) {
-      Alert.alert('Missing info', 'Email and password are required.');
-      return;
-    }
-    if (password.length < 8) {
-      Alert.alert('Password too short', 'Use at least 8 characters.');
-      return;
-    }
-    setBusy(true);
+function RoleCard({ icon, title, description, active, onPress }: RoleCardProps) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="radio"
+      accessibilityState={{ selected: active }}
+      accessibilityLabel={title}
+      className="flex-1"
+    >
+      <MotiView
+        animate={{ scale: active ? 1.02 : 1 }}
+        transition={{ type: 'timing', duration: 150 }}
+      >
+        {active ? (
+          <LinearGradient
+            colors={['#A5B4FC', '#818CF8', '#F472B6']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={{ borderRadius: 18, padding: 1.5 }}
+          >
+            <View className="rounded-2xl bg-white p-4">
+              <View className="mb-2 h-9 w-9 items-center justify-center rounded-xl bg-brand-50">
+                {icon}
+              </View>
+              <Text className="text-sm font-bold text-ink-900">{title}</Text>
+              <Text className="mt-0.5 text-xs text-ink-500">{description}</Text>
+            </View>
+          </LinearGradient>
+        ) : (
+          <View className="rounded-2xl border border-ink-200 bg-white p-4">
+            <View className="mb-2 h-9 w-9 items-center justify-center rounded-xl bg-ink-100">
+              {icon}
+            </View>
+            <Text className="text-sm font-bold text-ink-900">{title}</Text>
+            <Text className="mt-0.5 text-xs text-ink-500">{description}</Text>
+          </View>
+        )}
+      </MotiView>
+    </Pressable>
+  );
+}
+
+export default function RegisterScreen({ navigation }: Props) {
+  const { register } = useAuth();
+  const toast = useToast();
+
+  const [role, setRole] = useState<UserRole>('client');
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [orgName, setOrgName] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  const onSubmit = async () => {
+    const next: Record<string, string> = {};
+    if (!name.trim())                next.name = 'What should we call you?';
+    if (!email || !email.includes('@')) next.email = 'Enter a valid email';
+    if (password.length < 8)         next.password = 'At least 8 characters';
+    if (role === 'planner' && !orgName.trim()) next.orgName = "Name your planner workspace";
+    setErrors(next);
+    if (Object.keys(next).length) return;
+
+    setSubmitting(true);
     try {
-      await signUp(email.trim(), password, name.trim());
-      navigation.reset({ index: 0, routes: [{ name: 'Home' }] });
+      await register({
+        email:    email.trim().toLowerCase(),
+        password,
+        name:     name.trim(),
+        role,
+        org_name: role === 'planner' ? orgName.trim() : undefined,
+      });
+      toast.success(
+        role === 'planner' ? 'Workspace created!' : 'Welcome aboard!',
+        role === 'planner' ? `${orgName} is ready` : "Let's plan your event",
+      );
     } catch (e: any) {
-      Alert.alert('Sign up failed', e?.message ?? 'Unknown error');
+      toast.error('Sign up failed', e?.message ?? 'Try again');
     } finally {
-      setBusy(false);
+      setSubmitting(false);
     }
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
-      >
-        <View style={styles.inner}>
-          <TouchableOpacity onPress={() => navigation.goBack()} hitSlop={10}>
-            <Text style={styles.back}>‹ Back</Text>
-          </TouchableOpacity>
-          <Text style={styles.title}>Create your account</Text>
-          <Text style={styles.sub}>Organizers sign up here to manage event requests.</Text>
-
-          <View style={styles.field}>
-            <Text style={styles.label}>Name</Text>
-            <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="Your name" placeholderTextColor="#9CA3AF" />
-          </View>
-          <View style={styles.field}>
-            <Text style={styles.label}>Email</Text>
-            <TextInput
-              style={styles.input}
-              value={email} onChangeText={setEmail}
-              placeholder="you@example.com" placeholderTextColor="#9CA3AF"
-              keyboardType="email-address" autoCapitalize="none" autoCorrect={false}
-            />
-          </View>
-          <View style={styles.field}>
-            <Text style={styles.label}>Password</Text>
-            <TextInput
-              style={styles.input}
-              value={password} onChangeText={setPassword}
-              placeholder="At least 8 characters" placeholderTextColor="#9CA3AF"
-              secureTextEntry
-            />
-          </View>
-
-          <TouchableOpacity
-            style={[styles.primaryBtn, busy && { opacity: 0.6 }]}
-            disabled={busy}
-            onPress={submit}
-            activeOpacity={0.85}
+    <Screen scroll>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View className="mb-2 flex-row items-center">
+          <Pressable
+            onPress={() => navigation.goBack()}
+            hitSlop={12}
+            className="-ml-2 mr-2 p-2"
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
           >
-            {busy ? <ActivityIndicator color="#FFF" /> : <Text style={styles.primaryText}>Create account</Text>}
-          </TouchableOpacity>
+            <ArrowLeft size={22} color="#334155" />
+          </Pressable>
+        </View>
+
+        <MotiView
+          from={{ opacity: 0, translateY: -6 }}
+          animate={{ opacity: 1, translateY: 0 }}
+          transition={{ type: 'timing', duration: 350 }}
+        >
+          <Text className="text-3xl font-bold text-ink-900">Create your account</Text>
+          <Text className="mt-1 text-base text-ink-500">Pick how you'll use the app</Text>
+        </MotiView>
+
+        <View className="mt-6 flex-row gap-x-3">
+          <RoleCard
+            icon={<Sparkles size={18} color="#6366F1" />}
+            title="I'm a client"
+            description="Submit event requests to planners"
+            active={role === 'client'}
+            onPress={() => setRole('client')}
+          />
+          <RoleCard
+            icon={<Building2 size={18} color="#6366F1" />}
+            title="I'm a planner"
+            description="Manage events, team, inventory"
+            active={role === 'planner'}
+            onPress={() => setRole('planner')}
+          />
+        </View>
+
+        <View className="mt-6 gap-y-4">
+          <Input
+            label="Your name"
+            value={name}
+            onChangeText={setName}
+            placeholder="Alex Rivera"
+            autoCapitalize="words"
+            leftIcon={<UserIcon size={18} color="#64748B" />}
+            error={errors.name}
+          />
+          <Input
+            label="Email"
+            value={email}
+            onChangeText={setEmail}
+            placeholder="you@company.com"
+            keyboardType="email-address"
+            autoCapitalize="none"
+            autoComplete="email"
+            textContentType="emailAddress"
+            leftIcon={<Mail size={18} color="#64748B" />}
+            error={errors.email}
+          />
+          <Input
+            label="Password"
+            value={password}
+            onChangeText={setPassword}
+            placeholder="At least 8 characters"
+            isPassword
+            autoComplete="new-password"
+            textContentType="newPassword"
+            leftIcon={<Lock size={18} color="#64748B" />}
+            error={errors.password}
+          />
+
+          <AnimatePresence>
+            {role === 'planner' ? (
+              <MotiView
+                key="org-name"
+                from={{ opacity: 0, translateY: -6, height: 0 }}
+                animate={{ opacity: 1, translateY: 0, height: 'auto' }}
+                exit={{ opacity: 0, translateY: -6, height: 0 }}
+                transition={{ type: 'timing', duration: 220 }}
+              >
+                <Input
+                  label="Workspace name"
+                  value={orgName}
+                  onChangeText={setOrgName}
+                  placeholder="Rivera Events Co."
+                  autoCapitalize="words"
+                  leftIcon={<Building2 size={18} color="#64748B" />}
+                  hint="This is what your clients will see"
+                  error={errors.orgName}
+                />
+              </MotiView>
+            ) : null}
+          </AnimatePresence>
+
+          <Button
+            onPress={onSubmit}
+            loading={submitting}
+            fullWidth
+            size="lg"
+            iconRight={<ArrowRight size={18} color="#fff" />}
+            accessibilityLabel="Create account"
+            className="mt-2"
+          >
+            Create account
+          </Button>
+        </View>
+
+        <View className="mt-8 flex-row items-center justify-center">
+          <Text className="text-sm text-ink-500">Already have an account?  </Text>
+          <Text
+            onPress={() => navigation.navigate('Login')}
+            className="text-sm font-semibold text-brand-600"
+            accessibilityRole="link"
+          >
+            Sign in
+          </Text>
         </View>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F7FA' },
-  inner: { flex: 1, paddingHorizontal: 24, paddingTop: 12 },
-  back:  { color: INDIGO, fontSize: 16, fontWeight: '600', marginBottom: 24 },
-
-  title: { fontSize: 28, fontWeight: '800', color: '#1A1A2E', marginBottom: 6 },
-  sub:   { fontSize: 14, color: GRAY, marginBottom: 24 },
-
-  field: { marginBottom: 14 },
-  label: { fontSize: 13, fontWeight: '600', color: '#374151', marginBottom: 6 },
-  input: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12, borderWidth: 1, borderColor: '#E5E7EB',
-    paddingHorizontal: 14, paddingVertical: 12,
-    fontSize: 15, color: '#1F2937',
-  },
-
-  primaryBtn: {
-    backgroundColor: INDIGO,
-    paddingVertical: 14, borderRadius: 14,
-    alignItems: 'center', marginTop: 8,
-  },
-  primaryText: { color: '#FFF', fontSize: 16, fontWeight: '700' },
-});

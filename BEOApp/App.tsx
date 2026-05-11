@@ -1,74 +1,81 @@
+import './global.css';
+
 import React from 'react';
+import { ActivityIndicator, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import { QueryClientProvider } from '@tanstack/react-query';
 
-import HomeScreen from './src/screens/HomeScreen';
-import PDFViewerScreen from './src/screens/PDFViewerScreen';
-import SheetViewScreen from './src/screens/SheetViewScreen';
-import BinListScreen from './src/screens/BinListScreen';
-import CoffeeScreen from './src/screens/CoffeeScreen';
-import RunOfShowScreen from './src/screens/RunOfShowScreen';
-import ClientEventRequestScreen from './src/screens/ClientEventRequestScreen';
-import OrganizerDashboardScreen from './src/screens/OrganizerDashboardScreen';
-import EventRequestDetailScreen from './src/screens/EventRequestDetailScreen';
-import LoginScreen from './src/screens/LoginScreen';
-import RegisterScreen from './src/screens/RegisterScreen';
-import InventoryScreen from './src/screens/InventoryScreen';
-import TeamRosterScreen from './src/screens/TeamRosterScreen';
-import WorkflowsScreen from './src/screens/WorkflowsScreen';
-import WorkflowEditScreen from './src/screens/WorkflowEditScreen';
-import { AuthProvider } from './src/auth/AuthContext';
+import { queryClient } from '@/lib/queryClient';
+import { AuthProvider, useAuth } from '@/auth/AuthContext';
+import { ToastProvider } from '@/components/ui/Toast';
+
+import LoginScreen from '@/screens/LoginScreen';
+import RegisterScreen from '@/screens/RegisterScreen';
+import ClientEventRequestScreen from '@/screens/ClientEventRequestScreen';
+import OrganizerDashboardScreen from '@/screens/OrganizerDashboardScreen';
+import EventRequestDetailScreen from '@/screens/EventRequestDetailScreen';
 
 export type RootStackParamList = {
-  Home: undefined;
-  PDFViewer: { uri: string; name: string };
-  SheetView: { uri: string; name: string; totalPages: number };
-  BinList:    { weekId: number; weekLabel: string };
-  Coffee:     { weekId: number; weekLabel: string };
-  RunOfShow:  { weekId: number; weekLabel: string };
-
-  ClientEventRequest: undefined;
-  OrganizerDashboard: undefined;
-  EventRequestDetail: { requestId: number };
-
-  Login:    undefined;
-  Register: undefined;
-
-  Inventory:   undefined;
-  TeamRoster:  undefined;
-  Workflows:   undefined;
-  WorkflowEdit: { workflowId: number };
+  Login:                undefined;
+  Register:             undefined;
+  ClientEventRequest:   { slug?: string } | undefined;
+  OrganizerDashboard:   undefined;
+  EventRequestDetail:   { id: number };
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
-export default function App() {
+function Router() {
+  const { user, initializing } = useAuth();
+
+  if (initializing) {
+    return (
+      <View className="flex-1 items-center justify-center bg-ink-50">
+        <ActivityIndicator size="large" color="#6366F1" />
+      </View>
+    );
+  }
+
+  const isPlanner = user?.role === 'planner';
+  const isAuthed  = !!user;
+
   return (
-    <AuthProvider>
-      <NavigationContainer>
-        <StatusBar style="auto" />
-        <Stack.Navigator
-          initialRouteName="Home"
-          screenOptions={{ headerShown: false }}
-        >
-          <Stack.Screen name="Home" component={HomeScreen} />
-          <Stack.Screen name="PDFViewer" component={PDFViewerScreen} />
-          <Stack.Screen name="SheetView" component={SheetViewScreen} />
-          <Stack.Screen name="BinList" component={BinListScreen} />
-          <Stack.Screen name="Coffee" component={CoffeeScreen} />
-          <Stack.Screen name="RunOfShow" component={RunOfShowScreen} />
-          <Stack.Screen name="ClientEventRequest" component={ClientEventRequestScreen} />
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      {isPlanner ? (
+        <>
           <Stack.Screen name="OrganizerDashboard" component={OrganizerDashboardScreen} />
           <Stack.Screen name="EventRequestDetail" component={EventRequestDetailScreen} />
-          <Stack.Screen name="Login"    component={LoginScreen} />
-          <Stack.Screen name="Register" component={RegisterScreen} />
-          <Stack.Screen name="Inventory"   component={InventoryScreen} />
-          <Stack.Screen name="TeamRoster"  component={TeamRosterScreen} />
-          <Stack.Screen name="Workflows"   component={WorkflowsScreen} />
-          <Stack.Screen name="WorkflowEdit" component={WorkflowEditScreen} />
-        </Stack.Navigator>
-      </NavigationContainer>
-    </AuthProvider>
+        </>
+      ) : isAuthed ? (
+        // Authenticated client — drop them straight into the submit flow.
+        <Stack.Screen name="ClientEventRequest" component={ClientEventRequestScreen} />
+      ) : (
+        <>
+          <Stack.Screen name="Login"              component={LoginScreen} />
+          <Stack.Screen name="Register"           component={RegisterScreen} />
+          <Stack.Screen name="ClientEventRequest" component={ClientEventRequestScreen} />
+        </>
+      )}
+    </Stack.Navigator>
+  );
+}
+
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <ToastProvider>
+            <StatusBar style="dark" />
+            <NavigationContainer>
+              <Router />
+            </NavigationContainer>
+          </ToastProvider>
+        </AuthProvider>
+      </QueryClientProvider>
+    </SafeAreaProvider>
   );
 }

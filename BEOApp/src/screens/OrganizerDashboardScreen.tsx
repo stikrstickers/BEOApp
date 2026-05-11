@@ -1,227 +1,226 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import { FlatList, Pressable, RefreshControl, Text, View } from 'react-native';
+import { MotiView } from 'moti';
+import { LinearGradient } from 'expo-linear-gradient';
 import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  SafeAreaView,
-  ScrollView,
-  RefreshControl,
-  ActivityIndicator,
-} from 'react-native';
-import { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { useFocusEffect } from '@react-navigation/native';
-import { RootStackParamList } from '../../App';
-import { useAuth } from '../auth/AuthContext';
-import { apiFetch } from '../auth/api';
-import { EventRequest, RequestStatus } from '../types';
+  Calendar, Users, ChevronRight, Inbox, LogOut, Sparkles, Search,
+} from 'lucide-react-native';
+import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useQuery } from '@tanstack/react-query';
 
-const INDIGO = '#4F46E5';
-const GRAY   = '#6B7280';
+import { Screen } from '@/components/ui/Screen';
+import { Card } from '@/components/ui/Card';
+import { Badge } from '@/components/ui/Badge';
+import { Avatar } from '@/components/ui/Avatar';
+import { Skeleton } from '@/components/ui/Skeleton';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { Button } from '@/components/ui/Button';
+import { useAuth } from '@/auth/AuthContext';
+import { api } from '@/lib/api';
+import { cn } from '@/lib/cn';
+import {
+  STATUS_LABEL, STATUS_TONE, EVENT_TYPE_LABEL,
+  type EventRequest, type EventStatus,
+} from '@/lib/types';
+import type { RootStackParamList } from '../../App';
 
-type Props = {
-  navigation: NativeStackNavigationProp<RootStackParamList, 'OrganizerDashboard'>;
-};
+type Props = NativeStackScreenProps<RootStackParamList, 'OrganizerDashboard'>;
 
-const STATUS_TABS: { value: RequestStatus | 'all'; label: string }[] = [
+const STATUS_FILTERS: Array<{ value: EventStatus | 'all'; label: string }> = [
   { value: 'all',       label: 'All' },
   { value: 'new',       label: 'New' },
   { value: 'in_review', label: 'In review' },
   { value: 'confirmed', label: 'Confirmed' },
-  { value: 'declined',  label: 'Declined' },
-  { value: 'completed', label: 'Done' },
+  { value: 'completed', label: 'Completed' },
 ];
 
-const STATUS_COLOR: Record<RequestStatus, { bg: string; fg: string }> = {
-  new:       { bg: '#EEF2FF', fg: INDIGO },
-  in_review: { bg: '#FEF3C7', fg: '#92400E' },
-  confirmed: { bg: '#D1FAE5', fg: '#065F46' },
-  declined:  { bg: '#FEE2E2', fg: '#991B1B' },
-  completed: { bg: '#E5E7EB', fg: '#374151' },
-};
-
-function formatDate(iso: string | null | undefined): string {
+function formatDate(iso: string | null): string {
   if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  const d = new Date(`${iso}T00:00:00`);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 export default function OrganizerDashboardScreen({ navigation }: Props) {
-  const { token, user, signOut } = useAuth();
-  const [requests, setRequests] = useState<EventRequest[]>([]);
-  const [loading, setLoading]   = useState(true);
-  const [refreshing, setRefresh] = useState(false);
-  const [activeTab, setActiveTab] = useState<RequestStatus | 'all'>('all');
+  const { user, signOut } = useAuth();
+  const [filter, setFilter] = useState<EventStatus | 'all'>('all');
 
-  // Bounce to login if no token — organizer dashboard is auth-only.
-  useEffect(() => {
-    if (!token && !loading) {
-      navigation.replace('Login');
-    }
-  }, [token, loading, navigation]);
+  const q = useQuery<{ requests: EventRequest[] }>({
+    queryKey: ['event-requests'],
+    queryFn:  () => api('/api/event-requests/'),
+  });
 
-  const load = useCallback(async () => {
-    if (!token) { setLoading(false); return; }
-    try {
-      const path = activeTab === 'all'
-        ? '/api/event-requests/'
-        : `/api/event-requests/?status=${activeTab}`;
-      const json = await apiFetch<{ requests: EventRequest[] }>(path, { token });
-      setRequests(json.requests ?? []);
-    } catch (_) {
-      // backend offline / unauthorized — show empty
-    } finally {
-      setLoading(false);
-      setRefresh(false);
-    }
-  }, [activeTab, token]);
+  const filtered = useMemo(() => {
+    const items = q.data?.requests ?? [];
+    if (filter === 'all') return items;
+    return items.filter((r) => r.status === filter);
+  }, [q.data, filter]);
 
-  useEffect(() => { load(); }, [load]);
-  // Refresh whenever the screen regains focus (e.g. after returning from detail).
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  const counts = useMemo(() => {
+    const items = q.data?.requests ?? [];
+    const byStatus: Record<string, number> = {};
+    for (const r of items) byStatus[r.status] = (byStatus[r.status] ?? 0) + 1;
+    return {
+      all: items.length,
+      new: byStatus.new ?? 0,
+      in_review: byStatus.in_review ?? 0,
+      confirmed: byStatus.confirmed ?? 0,
+      completed: byStatus.completed ?? 0,
+    };
+  }, [q.data]);
 
-  const onRefresh = () => { setRefresh(true); load(); };
-
-  return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <View style={styles.headerTopRow}>
-          <TouchableOpacity onPress={() => navigation.goBack()} hitSlop={10}>
-            <Text style={styles.back}>‹ Back</Text>
-          </TouchableOpacity>
-          {user && (
-            <TouchableOpacity onPress={signOut} hitSlop={10}>
-              <Text style={styles.signOut}>Sign out</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-        <Text style={styles.title}>Event Requests</Text>
-        <Text style={styles.subtitle}>
-          {user?.name ? `${user.name} · ` : ''}
-          {requests.length} {activeTab === 'all' ? 'total' : activeTab.replace('_', ' ')}
-        </Text>
-      </View>
-
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.tabRow}
-        style={{ flexGrow: 0 }}
+  const renderItem = ({ item, index }: { item: EventRequest; index: number }) => {
+    const tone = STATUS_TONE[item.status];
+    return (
+      <MotiView
+        from={{ opacity: 0, translateY: 8 }}
+        animate={{ opacity: 1, translateY: 0 }}
+        transition={{ type: 'timing', duration: 280, delay: index * 30 }}
+        className="mb-3"
       >
-        {STATUS_TABS.map((t) => {
-          const active = t.value === activeTab;
-          return (
-            <TouchableOpacity
-              key={t.value}
-              style={[styles.tab, active && styles.tabActive]}
-              onPress={() => setActiveTab(t.value)}
-              activeOpacity={0.8}
+        <Card
+          onPress={() => navigation.navigate('EventRequestDetail', { id: item.id })}
+          accessibilityLabel={`Open ${item.event_name}`}
+        >
+          <View className="flex-row items-center p-4">
+            <Avatar name={item.client_name || item.event_name} size="md" />
+            <View className="ml-3 flex-1">
+              <View className="flex-row items-center justify-between">
+                <Text className="flex-1 pr-2 text-base font-semibold text-ink-900" numberOfLines={1}>
+                  {item.event_name}
+                </Text>
+                <Badge bgClassName={tone.bg} textClassName={tone.text} dot>
+                  {STATUS_LABEL[item.status]}
+                </Badge>
+              </View>
+              <Text className="mt-0.5 text-sm text-ink-500" numberOfLines={1}>
+                {item.client_name}{item.client_org ? ` · ${item.client_org}` : ''}
+              </Text>
+              <View className="mt-2 flex-row items-center">
+                <Calendar size={14} color="#64748B" />
+                <Text className="ml-1.5 text-xs text-ink-500">{formatDate(item.preferred_date)}</Text>
+                <View className="mx-2 h-1 w-1 rounded-full bg-ink-300" />
+                <Users size={14} color="#64748B" />
+                <Text className="ml-1 text-xs text-ink-500">{item.headcount}</Text>
+                <View className="mx-2 h-1 w-1 rounded-full bg-ink-300" />
+                <Text className="text-xs text-ink-500">{EVENT_TYPE_LABEL[item.event_type]}</Text>
+              </View>
+            </View>
+            <ChevronRight size={18} color="#94A3B8" className="ml-1" />
+          </View>
+        </Card>
+      </MotiView>
+    );
+  };
+
+  const ListHeader = (
+    <View>
+      {/* Greeting card */}
+      <MotiView
+        from={{ opacity: 0, translateY: -6 }}
+        animate={{ opacity: 1, translateY: 0 }}
+        transition={{ type: 'timing', duration: 300 }}
+        className="mb-5"
+      >
+        <LinearGradient
+          colors={['#6366F1', '#8B5CF6', '#EC4899']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={{ borderRadius: 24, padding: 20 }}
+        >
+          <View className="flex-row items-center justify-between">
+            <View className="flex-1 pr-3">
+              <View className="mb-1 flex-row items-center">
+                <Sparkles size={16} color="#FDE68A" />
+                <Text className="ml-1.5 text-xs font-semibold uppercase tracking-wide text-white/80">
+                  {user?.organization?.name ?? 'Workspace'}
+                </Text>
+              </View>
+              <Text className="text-2xl font-bold text-white">Hey {user?.name?.split(' ')[0] ?? 'there'}</Text>
+              <Text className="mt-1 text-sm text-white/85">
+                {counts.new} new · {counts.in_review} in review · {counts.confirmed} confirmed
+              </Text>
+            </View>
+            <Pressable
+              onPress={signOut}
+              hitSlop={12}
+              className="h-10 w-10 items-center justify-center rounded-full bg-white/15"
+              accessibilityRole="button" accessibilityLabel="Sign out"
             >
-              <Text style={[styles.tabText, active && styles.tabTextActive]}>{t.label}</Text>
-            </TouchableOpacity>
+              <LogOut size={18} color="#fff" />
+            </Pressable>
+          </View>
+        </LinearGradient>
+      </MotiView>
+
+      {/* Filter chips */}
+      <View className="mb-4 flex-row flex-wrap gap-2">
+        {STATUS_FILTERS.map((f) => {
+          const active = f.value === filter;
+          const n = counts[f.value as keyof typeof counts] ?? 0;
+          return (
+            <Pressable
+              key={f.value}
+              onPress={() => setFilter(f.value)}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: active }}
+              accessibilityLabel={`${f.label} (${n})`}
+              className={cn(
+                'flex-row items-center rounded-full border px-3.5 py-2',
+                active ? 'border-brand-500 bg-brand-50' : 'border-ink-200 bg-white',
+              )}
+            >
+              <Text className={cn('text-sm font-semibold', active ? 'text-brand-700' : 'text-ink-700')}>
+                {f.label}
+              </Text>
+              <View className={cn(
+                'ml-2 rounded-full px-1.5 py-0.5',
+                active ? 'bg-brand-600' : 'bg-ink-200',
+              )}>
+                <Text className={cn('text-[10px] font-bold', active ? 'text-white' : 'text-ink-700')}>
+                  {n}
+                </Text>
+              </View>
+            </Pressable>
           );
         })}
-      </ScrollView>
+      </View>
+    </View>
+  );
 
-      {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={INDIGO} />
-        </View>
-      ) : (
-        <ScrollView
-          contentContainerStyle={styles.scroll}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={INDIGO} />}
-        >
-          {requests.length === 0 ? (
-            <View style={styles.empty}>
-              <Text style={styles.emptyTitle}>No requests yet</Text>
-              <Text style={styles.emptyHint}>Client submissions appear here.</Text>
-            </View>
-          ) : (
-            requests.map((r) => {
-              const c = STATUS_COLOR[r.status];
-              return (
-                <TouchableOpacity
-                  key={r.id}
-                  style={styles.card}
-                  onPress={() => navigation.navigate('EventRequestDetail', { requestId: r.id })}
-                  activeOpacity={0.85}
-                >
-                  <View style={styles.cardTop}>
-                    <Text style={styles.eventName} numberOfLines={1}>{r.event_name}</Text>
-                    <View style={[styles.badge, { backgroundColor: c.bg }]}>
-                      <Text style={[styles.badgeText, { color: c.fg }]}>
-                        {r.status.replace('_', ' ')}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text style={styles.client}>
-                    {r.client_name}{r.organization ? `  ·  ${r.organization}` : ''}
-                  </Text>
-                  <View style={styles.metaRow}>
-                    <Text style={styles.meta}>📅 {formatDate(r.preferred_date)}</Text>
-                    <Text style={styles.meta}>⏰ {r.start_time}–{r.end_time}</Text>
-                    <Text style={styles.meta}>👥 {r.headcount}</Text>
-                  </View>
-                </TouchableOpacity>
-              );
-            })
-          )}
-          <View style={{ height: 40 }} />
-        </ScrollView>
-      )}
-    </SafeAreaView>
+  if (q.isLoading) {
+    return (
+      <Screen>
+        {ListHeader}
+        {Array.from({ length: 4 }).map((_, i) => (
+          <Skeleton key={i} className="mb-3 h-24 w-full" />
+        ))}
+      </Screen>
+    );
+  }
+
+  return (
+    <Screen contentClassName="px-5 py-0">
+      <FlatList
+        data={filtered}
+        keyExtractor={(item) => String(item.id)}
+        renderItem={renderItem}
+        ListHeaderComponent={ListHeader}
+        ListEmptyComponent={
+          <EmptyState
+            icon={<Inbox size={26} color="#6366F1" />}
+            title={filter === 'all' ? 'No requests yet' : `No ${STATUS_LABEL[filter as EventStatus] ?? filter} requests`}
+            description={
+              filter === 'all'
+                ? `Share your handle "${user?.organization?.slug}" with clients to start receiving requests`
+                : 'Try a different filter'
+            }
+          />
+        }
+        refreshControl={
+          <RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor="#6366F1" />
+        }
+        contentContainerStyle={{ paddingTop: 16, paddingBottom: 32 }}
+      />
+    </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F7FA' },
-  centered:  { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  header:    { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8 },
-  headerTopRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
-  signOut:   { color: GRAY, fontSize: 14, fontWeight: '600' },
-  back:      { color: INDIGO, fontSize: 16, fontWeight: '600' },
-  title:     { fontSize: 28, fontWeight: '800', color: '#1A1A2E' },
-  subtitle:  { fontSize: 14, color: GRAY, marginTop: 4, textTransform: 'capitalize' },
-
-  tabRow: { paddingHorizontal: 16, paddingVertical: 10, gap: 8 },
-  tab: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 999,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-  },
-  tabActive: { backgroundColor: INDIGO, borderColor: INDIGO },
-  tabText: { fontSize: 13, fontWeight: '600', color: '#374151' },
-  tabTextActive: { color: '#FFFFFF' },
-
-  scroll: { paddingHorizontal: 16, paddingTop: 4 },
-
-  card: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 14,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    elevation: 2,
-  },
-  cardTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
-  eventName: { fontSize: 16, fontWeight: '700', color: '#1F2937', flex: 1, marginRight: 10 },
-  badge: { paddingHorizontal: 10, paddingVertical: 3, borderRadius: 999 },
-  badgeText: { fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5 },
-  client: { fontSize: 13, color: GRAY, marginBottom: 8 },
-  metaRow: { flexDirection: 'row', gap: 14, flexWrap: 'wrap' },
-  meta: { fontSize: 12, color: '#374151' },
-
-  empty: { paddingVertical: 60, alignItems: 'center' },
-  emptyTitle: { fontSize: 16, fontWeight: '700', color: '#374151', marginBottom: 4 },
-  emptyHint:  { fontSize: 13, color: GRAY },
-});

@@ -1,487 +1,366 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useMemo, useState } from 'react';
+import { Linking, Pressable, RefreshControl, ScrollView, Text, View } from 'react-native';
+import { MotiView, AnimatePresence } from 'moti';
 import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  SafeAreaView,
-  ScrollView,
-  Alert,
-  ActivityIndicator,
-  Modal,
-  KeyboardAvoidingView,
-  Platform,
-} from 'react-native';
+  ArrowLeft, Calendar, Clock, Users, MapPin, UtensilsCrossed, Cpu,
+  Mail, Phone, Building2, FileText, ChevronDown, Check,
+} from 'lucide-react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../../App';
-import { useAuth } from '../auth/AuthContext';
-import { apiFetch } from '../auth/api';
-import { EventAssignment, EventRequest, RequestStatus, TeamMember, WorkflowRun } from '../types';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
-const INDIGO = '#4F46E5';
-const GRAY   = '#6B7280';
+import { Screen } from '@/components/ui/Screen';
+import { Card } from '@/components/ui/Card';
+import { Badge } from '@/components/ui/Badge';
+import { Avatar } from '@/components/ui/Avatar';
+import { Skeleton } from '@/components/ui/Skeleton';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { useToast } from '@/components/ui/Toast';
+import { api, ApiError } from '@/lib/api';
+import { cn } from '@/lib/cn';
+import {
+  STATUS_LABEL, STATUS_TONE, EVENT_TYPE_LABEL, FOOD_SERVICE_LABEL, TECH_NEEDS_LABEL,
+  type EventRequest, type EventStatus, type EventAssignment,
+} from '@/lib/types';
+import type { RootStackParamList } from '../../App';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'EventRequestDetail'>;
 
-const STATUS_OPTIONS: { value: RequestStatus; label: string }[] = [
-  { value: 'new',       label: 'New' },
-  { value: 'in_review', label: 'In Review' },
-  { value: 'confirmed', label: 'Confirmed' },
-  { value: 'declined',  label: 'Declined' },
-  { value: 'completed', label: 'Completed' },
-];
-
-const EVENT_TYPE_LABEL: Record<string, string> = {
-  corporate: 'Corporate', wedding: 'Wedding', conference: 'Conference',
-  social: 'Social', nonprofit: 'Nonprofit', other: 'Other',
-};
-const FOOD_LABEL: Record<string, string> = {
-  none: 'None', light: 'Light bites', plated: 'Plated', buffet: 'Buffet', cocktail: 'Cocktail',
-};
-const TECH_LABEL: Record<string, string> = {
-  none: 'None', basic_av: 'Basic A/V', full_av: 'Full A/V', livestream: 'Livestream',
+// Allowed onward transitions, matching the backend state machine.
+const NEXT_STATUSES: Record<EventStatus, EventStatus[]> = {
+  new:       ['in_review', 'confirmed', 'declined'],
+  in_review: ['confirmed', 'declined', 'new'],
+  confirmed: ['completed', 'declined', 'in_review'],
+  declined:  [],
+  completed: [],
 };
 
 function fmtDate(iso: string | null): string {
   if (!iso) return '—';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' });
+  const d = new Date(`${iso}T00:00:00`);
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-export default function EventRequestDetailScreen({ route, navigation }: Props) {
-  const { requestId } = route.params;
-  const { token } = useAuth();
-  const [req, setReq]   = useState<EventRequest | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving]   = useState(false);
-  const [note, setNote]       = useState('');
-  const [assignments, setAssignments] = useState<EventAssignment[]>([]);
-  const [runs, setRuns]               = useState<WorkflowRun[]>([]);
+function fmtTime(s: string | null): string {
+  if (!s) return '—';
+  const [h, m] = s.split(':').map(Number);
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+}
 
-  // Assign-staff modal
-  const [assignModalOpen, setAssignModalOpen] = useState(false);
-  const [members, setMembers]                 = useState<TeamMember[]>([]);
-  const [selectedMemberId, setSelectedMember] = useState<number | null>(null);
-  const [roleOnEvent, setRoleOnEvent]         = useState('');
-
-  useEffect(() => {
-    if (!token) navigation.replace('Login');
-  }, [token, navigation]);
-
-  const load = useCallback(async () => {
-    if (!token) { setLoading(false); return; }
-    try {
-      const [reqRes, assignRes, runRes] = await Promise.all([
-        apiFetch<{ request: EventRequest }>(`/api/event-requests/${requestId}/`, { token }),
-        apiFetch<{ assignments: EventAssignment[] }>(`/api/event-requests/${requestId}/assignments/`, { token }),
-        apiFetch<{ runs: WorkflowRun[] }>(`/api/event-requests/${requestId}/workflow-runs/`, { token }),
-      ]);
-      setReq(reqRes.request);
-      setNote(reqRes.request.organizer_note || '');
-      setAssignments(assignRes.assignments);
-      setRuns(runRes.runs);
-    } catch (e: any) {
-      Alert.alert('Load failed', e?.message ?? 'Unknown error');
-    } finally {
-      setLoading(false);
-    }
-  }, [requestId, token]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const updateStatus = async (status: RequestStatus) => {
-    if (!req) return;
-    setSaving(true);
-    try {
-      const json = await apiFetch<{ request: EventRequest }>(
-        `/api/event-requests/${requestId}/`,
-        { method: 'PATCH', token, body: JSON.stringify({ status }) },
-      );
-      setReq(json.request);
-      // Workflow runs may have fired on this status change — refresh the log.
-      const runRes = await apiFetch<{ runs: WorkflowRun[] }>(`/api/event-requests/${requestId}/workflow-runs/`, { token });
-      setRuns(runRes.runs);
-    } catch (e: any) {
-      Alert.alert('Update failed', e?.message ?? 'Unknown error');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const saveNote = async () => {
-    if (!req) return;
-    setSaving(true);
-    try {
-      const json = await apiFetch<{ request: EventRequest }>(
-        `/api/event-requests/${requestId}/`,
-        { method: 'PATCH', token, body: JSON.stringify({ organizer_note: note }) },
-      );
-      setReq(json.request);
-      Alert.alert('Saved', 'Organizer note updated.');
-    } catch (e: any) {
-      Alert.alert('Save failed', e?.message ?? 'Unknown error');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const openAssignModal = async () => {
-    try {
-      const json = await apiFetch<{ members: TeamMember[] }>('/api/team/', { token });
-      setMembers(json.members);
-      setSelectedMember(null);
-      setRoleOnEvent('');
-      setAssignModalOpen(true);
-    } catch (e: any) {
-      Alert.alert('Load team failed', e?.message);
-    }
-  };
-
-  const assignMember = async () => {
-    if (!selectedMemberId) {
-      Alert.alert('Pick a member', 'Select a team member to assign.');
-      return;
-    }
-    setSaving(true);
-    try {
-      await apiFetch(`/api/event-requests/${requestId}/assignments/`, {
-        method: 'POST', token,
-        body: JSON.stringify({ team_member: selectedMemberId, role_on_event: roleOnEvent }),
-      });
-      setAssignModalOpen(false);
-      const a = await apiFetch<{ assignments: EventAssignment[] }>(`/api/event-requests/${requestId}/assignments/`, { token });
-      setAssignments(a.assignments);
-    } catch (e: any) {
-      Alert.alert('Assignment failed', e?.message ?? 'Unknown error');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const unassign = (a: EventAssignment) => {
-    Alert.alert('Unassign?', `Remove ${a.team_member.name}?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Remove', style: 'destructive',
-        onPress: async () => {
-          try {
-            await apiFetch(`/api/assignments/${a.id}/`, { method: 'DELETE', token });
-            setAssignments(assignments.filter((x) => x.id !== a.id));
-          } catch (e: any) {
-            Alert.alert('Error', e?.message);
-          }
-        },
-      },
-    ]);
-  };
-
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.centered}><ActivityIndicator size="large" color={INDIGO} /></View>
-      </SafeAreaView>
-    );
-  }
-
-  if (!req) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.centered}><Text style={{ color: GRAY }}>Request not found.</Text></View>
-      </SafeAreaView>
-    );
-  }
-
-  const Row = ({ k, v }: { k: string; v: string | number | null }) => (
-    <View style={styles.row}>
-      <Text style={styles.rowKey}>{k}</Text>
-      <Text style={styles.rowVal}>{v === null || v === '' ? '—' : String(v)}</Text>
+function Field({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+  return (
+    <View className="flex-row items-start py-2.5">
+      <View className="mr-3 mt-0.5 h-8 w-8 items-center justify-center rounded-lg bg-ink-100">
+        {icon}
+      </View>
+      <View className="flex-1">
+        <Text className="text-xs uppercase tracking-wide text-ink-500">{label}</Text>
+        <Text className="mt-0.5 text-sm font-medium text-ink-900">{value || '—'}</Text>
+      </View>
     </View>
   );
+}
+
+function StatusChanger({
+  current, onChange, busy,
+}: {
+  current: EventStatus;
+  onChange: (s: EventStatus) => void;
+  busy?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const options = NEXT_STATUSES[current];
+  const tone = STATUS_TONE[current];
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} hitSlop={10}>
-          <Text style={styles.back}>‹ Back</Text>
-        </TouchableOpacity>
-        <Text style={styles.title} numberOfLines={2}>{req.event_name}</Text>
-        <Text style={styles.subtitle}>
-          Submitted {new Date(req.submitted_at).toLocaleString()}
-        </Text>
-      </View>
-
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
-      >
-      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-        {/* Status switcher */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Status</Text>
-          <View style={styles.statusRow}>
-            {STATUS_OPTIONS.map((s) => {
-              const active = s.value === req.status;
-              return (
-                <TouchableOpacity
-                  key={s.value}
-                  style={[styles.statusChip, active && styles.statusChipActive]}
-                  onPress={() => updateStatus(s.value)}
-                  disabled={saving}
-                  activeOpacity={0.8}
-                >
-                  <Text style={[styles.statusChipText, active && styles.statusChipTextActive]}>{s.label}</Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Client</Text>
-          <Row k="Name"         v={req.client_name} />
-          <Row k="Email"        v={req.client_email} />
-          <Row k="Phone"        v={req.client_phone} />
-          <Row k="Organization" v={req.organization} />
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Event</Text>
-          <Row k="Type"            v={EVENT_TYPE_LABEL[req.event_type] || req.event_type} />
-          <Row k="Preferred date"  v={fmtDate(req.preferred_date)} />
-          <Row k="Alternate date"  v={fmtDate(req.alternate_date)} />
-          <Row k="Time"            v={`${req.start_time} – ${req.end_time}`} />
-          <Row k="Headcount"       v={req.headcount} />
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Venue & services</Text>
-          <Row k="Venue preference" v={req.venue_preference} />
-          <Row k="Food service"     v={FOOD_LABEL[req.food_service] || req.food_service} />
-          <Row k="Dietary notes"    v={req.dietary_notes} />
-          <Row k="Tech needs"       v={TECH_LABEL[req.tech_needs] || req.tech_needs} />
-          <Row k="RSVP invitations" v={req.rsvp_required ? 'Yes' : 'No'} />
-        </View>
-
-        {req.notes ? (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Client notes</Text>
-            <Text style={styles.body}>{req.notes}</Text>
-          </View>
-        ) : null}
-
-        {/* Assignments */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Team assignments</Text>
-            <TouchableOpacity onPress={openAssignModal} style={styles.miniBtn}>
-              <Text style={styles.miniBtnText}>＋ Assign</Text>
-            </TouchableOpacity>
-          </View>
-          {assignments.length === 0 ? (
-            <Text style={styles.emptySmall}>No one assigned yet.</Text>
-          ) : assignments.map((a) => (
-            <TouchableOpacity key={a.id} onLongPress={() => unassign(a)} activeOpacity={0.8} style={styles.assignRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.assignName}>{a.team_member.name}</Text>
-                <Text style={styles.assignMeta}>
-                  {a.team_member.role}{a.role_on_event ? ` · ${a.role_on_event}` : ''} · {a.status}
-                </Text>
-              </View>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Workflow runs */}
-        {runs.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Workflow runs</Text>
-            {runs.slice(0, 10).map((r) => (
-              <View key={r.id} style={styles.runRow}>
-                <Text style={[styles.runTitle, { color: r.success ? '#065F46' : '#991B1B' }]}>
-                  {r.success ? '✓' : '✗'} {r.workflow_name}
-                </Text>
-                <Text style={styles.runMeta}>{new Date(r.ran_at).toLocaleString()}</Text>
-                {r.log ? <Text style={styles.runLog}>{r.log}</Text> : null}
-              </View>
-            ))}
-          </View>
+    <View>
+      <Pressable
+        onPress={() => options.length && setOpen((v) => !v)}
+        disabled={!options.length || busy}
+        accessibilityRole="button"
+        accessibilityLabel={`Status: ${STATUS_LABEL[current]}. ${options.length ? 'Tap to change' : 'No further transitions.'}`}
+        className={cn(
+          'flex-row items-center rounded-full px-3.5 py-2',
+          tone.bg,
+          (!options.length || busy) && 'opacity-70',
         )}
+      >
+        <View className={cn('mr-2 h-1.5 w-1.5 rounded-full', tone.text.replace(/text-/, 'bg-'))} />
+        <Text className={cn('text-sm font-semibold', tone.text)}>{STATUS_LABEL[current]}</Text>
+        {options.length ? <ChevronDown size={14} color="currentColor" className="ml-1.5" /> : null}
+      </Pressable>
 
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Organizer note</Text>
-          <TextInput
-            style={[styles.input, { minHeight: 90, textAlignVertical: 'top' }]}
-            value={note}
-            onChangeText={setNote}
-            placeholder="Internal notes about this request..."
-            placeholderTextColor="#9CA3AF"
-            multiline
-          />
-          <TouchableOpacity
-            style={[styles.saveBtn, saving && { opacity: 0.6 }]}
-            onPress={saveNote}
-            disabled={saving}
-            activeOpacity={0.85}
+      <AnimatePresence>
+        {open ? (
+          <MotiView
+            from={{ opacity: 0, translateY: -6 }}
+            animate={{ opacity: 1, translateY: 0 }}
+            exit={{ opacity: 0, translateY: -6 }}
+            transition={{ type: 'timing', duration: 160 }}
+            className="absolute right-0 top-12 z-10 w-48 rounded-2xl border border-ink-200 bg-white p-1 shadow-lg"
           >
-            {saving ? <ActivityIndicator color="#FFF" /> : <Text style={styles.saveBtnText}>Save note</Text>}
-          </TouchableOpacity>
-        </View>
-
-        <View style={{ height: 120 }} />
-      </ScrollView>
-      </KeyboardAvoidingView>
-
-      <Modal visible={assignModalOpen} animationType="slide" onRequestClose={() => setAssignModalOpen(false)}>
-        <SafeAreaView style={styles.container}>
-          <View style={styles.header}>
-            <TouchableOpacity onPress={() => setAssignModalOpen(false)} hitSlop={10}>
-              <Text style={styles.back}>✕ Cancel</Text>
-            </TouchableOpacity>
-            <Text style={styles.title}>Assign team member</Text>
-          </View>
-          <KeyboardAvoidingView
-            style={{ flex: 1 }}
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-            keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
-          >
-          <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-            <Text style={styles.sectionTitle}>Choose member</Text>
-            {members.length === 0 ? (
-              <Text style={styles.emptySmall}>No team members yet — add some in the Team Roster screen first.</Text>
-            ) : members.map((m) => {
-              const active = m.id === selectedMemberId;
+            {options.map((s) => {
+              const t = STATUS_TONE[s];
               return (
-                <TouchableOpacity
-                  key={m.id}
-                  style={[styles.memberChoice, active && styles.memberChoiceActive]}
-                  onPress={() => setSelectedMember(m.id)}
-                  activeOpacity={0.85}
+                <Pressable
+                  key={s}
+                  onPress={() => { setOpen(false); onChange(s); }}
+                  className="flex-row items-center rounded-xl px-2.5 py-2"
+                  accessibilityRole="menuitem"
+                  accessibilityLabel={`Move to ${STATUS_LABEL[s]}`}
                 >
-                  <Text style={[styles.memberChoiceName, active && { color: '#FFF' }]}>{m.name}</Text>
-                  <Text style={[styles.memberChoiceRole, active && { color: 'rgba(255,255,255,0.85)' }]}>
-                    {m.role}{m.is_vendor ? ' · vendor' : ''}
-                  </Text>
-                </TouchableOpacity>
+                  <View className={cn('mr-2 h-2 w-2 rounded-full', t.text.replace(/text-/, 'bg-'))} />
+                  <Text className="text-sm font-medium text-ink-900">{STATUS_LABEL[s]}</Text>
+                </Pressable>
               );
             })}
-
-            <Text style={styles.sectionTitle}>Role on this event (optional)</Text>
-            <TextInput
-              style={styles.input}
-              value={roleOnEvent}
-              onChangeText={setRoleOnEvent}
-              placeholder="e.g. Lead Bartender"
-              placeholderTextColor="#9CA3AF"
-            />
-
-            <TouchableOpacity
-              style={[styles.saveBtn, (saving || !selectedMemberId) && { opacity: 0.6 }]}
-              disabled={saving || !selectedMemberId}
-              onPress={assignMember}
-            >
-              {saving ? <ActivityIndicator color="#FFF" /> : <Text style={styles.saveBtnText}>Assign</Text>}
-            </TouchableOpacity>
-            <View style={{ height: 120 }} />
-          </ScrollView>
-          </KeyboardAvoidingView>
-        </SafeAreaView>
-      </Modal>
-    </SafeAreaView>
+          </MotiView>
+        ) : null}
+      </AnimatePresence>
+    </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F5F7FA' },
-  centered:  { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  header:    { paddingHorizontal: 20, paddingTop: 12, paddingBottom: 8 },
-  back:      { color: INDIGO, fontSize: 16, fontWeight: '600', marginBottom: 8 },
-  title:     { fontSize: 24, fontWeight: '800', color: '#1A1A2E' },
-  subtitle:  { fontSize: 12, color: GRAY, marginTop: 4 },
+export default function EventRequestDetailScreen({ navigation, route }: Props) {
+  const { id } = route.params;
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [noteEdit, setNoteEdit] = useState<string | null>(null);
 
-  scroll: { paddingHorizontal: 16, paddingTop: 8 },
+  const reqQ = useQuery<{ request: EventRequest }>({
+    queryKey: ['event-request', id],
+    queryFn:  () => api(`/api/event-requests/${id}/`),
+  });
+  const asgnQ = useQuery<{ assignments: EventAssignment[] }>({
+    queryKey: ['event-assignments', id],
+    queryFn:  () => api(`/api/event-requests/${id}/assignments/`),
+  });
 
-  section: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 14,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-  },
-  sectionTitle: {
-    fontSize: 12, fontWeight: '700', textTransform: 'uppercase',
-    letterSpacing: 0.8, color: GRAY, marginBottom: 10,
-  },
+  const er = reqQ.data?.request;
 
-  row: { flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
-  rowKey: { width: 130, fontSize: 13, color: GRAY, fontWeight: '600' },
-  rowVal: { flex: 1, fontSize: 14, color: '#1F2937' },
-  body:   { fontSize: 14, color: '#1F2937', lineHeight: 20 },
+  const statusM = useMutation<{ request: EventRequest }, ApiError, EventStatus>({
+    mutationFn: (status) => api(`/api/event-requests/${id}/`, { method: 'PATCH', body: { status } }),
+    onSuccess: ({ request }) => {
+      qc.setQueryData(['event-request', id], { request });
+      qc.invalidateQueries({ queryKey: ['event-requests'] });
+      toast.success('Status updated', `Now ${STATUS_LABEL[request.status]}`);
+    },
+    onError: (e) => toast.error('Could not update status', e.message),
+  });
 
-  statusRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  statusChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 999,
-    backgroundColor: '#F3F4F6',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-  },
-  statusChipActive: { backgroundColor: INDIGO, borderColor: INDIGO },
-  statusChipText:   { fontSize: 13, fontWeight: '600', color: '#374151' },
-  statusChipTextActive: { color: '#FFFFFF' },
+  const noteM = useMutation<{ request: EventRequest }, ApiError, string>({
+    mutationFn: (text) => api(`/api/event-requests/${id}/`, { method: 'PATCH', body: { organizer_note: text } }),
+    onSuccess: ({ request }) => {
+      qc.setQueryData(['event-request', id], { request });
+      setNoteEdit(null);
+      toast.success('Note saved');
+    },
+    onError: (e) => toast.error('Could not save note', e.message),
+  });
 
-  input: {
-    backgroundColor: '#F9FAFB',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 15,
-    color: '#1F2937',
-  },
-  saveBtn: {
-    backgroundColor: INDIGO,
-    paddingVertical: 12,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  saveBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
+  const refreshing = reqQ.isRefetching || asgnQ.isRefetching;
 
-  // Assignments
-  sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
-  miniBtn:    { backgroundColor: INDIGO, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 },
-  miniBtnText: { color: '#FFF', fontSize: 12, fontWeight: '700' },
-  emptySmall: { fontSize: 13, color: GRAY, fontStyle: 'italic' },
-  assignRow: {
-    flexDirection: 'row',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
-  },
-  assignName: { fontSize: 14, fontWeight: '600', color: '#1F2937' },
-  assignMeta: { fontSize: 12, color: GRAY, marginTop: 2 },
+  return (
+    <Screen contentClassName="px-0 py-0">
+      <ScrollView
+        contentContainerStyle={{ paddingBottom: 32 }}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => { reqQ.refetch(); asgnQ.refetch(); }}
+            tintColor="#6366F1"
+          />
+        }
+      >
+        <View className="flex-row items-center justify-between px-5 pt-4">
+          <Pressable
+            onPress={() => navigation.goBack()}
+            hitSlop={12} className="-ml-2 p-2"
+            accessibilityRole="button" accessibilityLabel="Back to dashboard"
+          >
+            <ArrowLeft size={22} color="#334155" />
+          </Pressable>
+          {er ? <StatusChanger current={er.status} onChange={statusM.mutate} busy={statusM.isPending} /> : null}
+        </View>
 
-  // Workflow runs
-  runRow: { paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
-  runTitle: { fontSize: 13, fontWeight: '700' },
-  runMeta:  { fontSize: 11, color: GRAY, marginTop: 2 },
-  runLog:   { fontSize: 11, color: '#374151', marginTop: 4, fontFamily: 'Courier' },
+        {reqQ.isLoading || !er ? (
+          <View className="px-5 pt-4">
+            <Skeleton className="mb-4 h-8 w-64" />
+            <Skeleton className="mb-2 h-4 w-40" />
+            <Skeleton className="h-48 w-full" />
+          </View>
+        ) : (
+          <MotiView
+            from={{ opacity: 0, translateY: 6 }}
+            animate={{ opacity: 1, translateY: 0 }}
+            transition={{ type: 'timing', duration: 280 }}
+            className="px-5 pt-4"
+          >
+            <Text className="text-3xl font-bold text-ink-900">{er.event_name}</Text>
+            <View className="mt-2 flex-row items-center">
+              <Avatar name={er.client_name} size="sm" />
+              <Text className="ml-2 text-base text-ink-700">{er.client_name}</Text>
+              {er.client_org ? (
+                <Text className="text-base text-ink-500"> · {er.client_org}</Text>
+              ) : null}
+            </View>
+            <Badge
+              className="mt-3"
+              bgClassName="bg-brand-50"
+              textClassName="text-brand-700"
+            >
+              {EVENT_TYPE_LABEL[er.event_type]}
+            </Badge>
 
-  // Member chooser
-  memberChoice: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    marginBottom: 8,
-  },
-  memberChoiceActive: { backgroundColor: INDIGO, borderColor: INDIGO },
-  memberChoiceName: { fontSize: 14, fontWeight: '700', color: '#1F2937' },
-  memberChoiceRole: { fontSize: 12, color: GRAY, marginTop: 2, textTransform: 'capitalize' },
-});
+            {/* Quick stats */}
+            <Card className="mt-5">
+              <View className="p-4">
+                <Field icon={<Calendar size={16} color="#475569" />} label="Preferred date" value={fmtDate(er.preferred_date)} />
+                {er.alternate_date ? (
+                  <Field icon={<Calendar size={16} color="#475569" />} label="Alternate date" value={fmtDate(er.alternate_date)} />
+                ) : null}
+                <Field
+                  icon={<Clock size={16} color="#475569" />}
+                  label="Time"
+                  value={`${fmtTime(er.start_time)} – ${fmtTime(er.end_time)}`}
+                />
+                <Field icon={<Users size={16} color="#475569" />} label="Headcount" value={String(er.headcount)} />
+                {er.venue_preference ? (
+                  <Field icon={<MapPin size={16} color="#475569" />} label="Venue preference" value={er.venue_preference} />
+                ) : null}
+                <Field icon={<UtensilsCrossed size={16} color="#475569" />} label="Food service" value={FOOD_SERVICE_LABEL[er.food_service]} />
+                <Field icon={<Cpu size={16} color="#475569" />} label="Tech needs" value={TECH_NEEDS_LABEL[er.tech_needs]} />
+              </View>
+            </Card>
+
+            {/* Contact */}
+            <Text className="mt-6 mb-2 text-xs font-bold uppercase tracking-wider text-ink-500">Contact</Text>
+            <Card>
+              <View className="p-4">
+                <Pressable
+                  onPress={() => Linking.openURL(`mailto:${er.client_email}`)}
+                  accessibilityRole="link"
+                  accessibilityLabel={`Email ${er.client_email}`}
+                >
+                  <Field icon={<Mail size={16} color="#475569" />} label="Email" value={er.client_email} />
+                </Pressable>
+                {er.client_phone ? (
+                  <Pressable
+                    onPress={() => Linking.openURL(`tel:${er.client_phone}`)}
+                    accessibilityRole="link"
+                    accessibilityLabel={`Call ${er.client_phone}`}
+                  >
+                    <Field icon={<Phone size={16} color="#475569" />} label="Phone" value={er.client_phone} />
+                  </Pressable>
+                ) : null}
+                {er.client_org ? (
+                  <Field icon={<Building2 size={16} color="#475569" />} label="Company" value={er.client_org} />
+                ) : null}
+              </View>
+            </Card>
+
+            {/* Notes from client */}
+            {er.notes ? (
+              <>
+                <Text className="mt-6 mb-2 text-xs font-bold uppercase tracking-wider text-ink-500">From the client</Text>
+                <Card>
+                  <View className="p-4">
+                    <Text className="text-sm text-ink-700">{er.notes}</Text>
+                  </View>
+                </Card>
+              </>
+            ) : null}
+            {er.dietary_notes ? (
+              <>
+                <Text className="mt-4 mb-2 text-xs font-bold uppercase tracking-wider text-ink-500">Dietary notes</Text>
+                <Card>
+                  <View className="p-4">
+                    <Text className="text-sm text-ink-700">{er.dietary_notes}</Text>
+                  </View>
+                </Card>
+              </>
+            ) : null}
+
+            {/* Organizer note */}
+            <Text className="mt-6 mb-2 text-xs font-bold uppercase tracking-wider text-ink-500">Your notes</Text>
+            <Card>
+              <View className="p-4">
+                {noteEdit !== null ? (
+                  <>
+                    <Input
+                      value={noteEdit}
+                      onChangeText={setNoteEdit}
+                      multiline
+                      numberOfLines={4}
+                      inputClassName="min-h-[96px] py-2"
+                    />
+                    <View className="mt-3 flex-row gap-x-2">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onPress={() => setNoteEdit(null)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        loading={noteM.isPending}
+                        onPress={() => noteM.mutate(noteEdit)}
+                        iconRight={<Check size={14} color="#fff" />}
+                      >
+                        Save
+                      </Button>
+                    </View>
+                  </>
+                ) : (
+                  <Pressable
+                    onPress={() => setNoteEdit(er.organizer_note ?? '')}
+                    accessibilityRole="button"
+                    accessibilityLabel="Edit your notes"
+                  >
+                    <Text className={cn('text-sm', er.organizer_note ? 'text-ink-700' : 'text-ink-400')}>
+                      {er.organizer_note || 'Tap to add a private note…'}
+                    </Text>
+                  </Pressable>
+                )}
+              </View>
+            </Card>
+
+            {/* Assignments */}
+            <Text className="mt-6 mb-2 text-xs font-bold uppercase tracking-wider text-ink-500">
+              Team assigned
+            </Text>
+            <Card>
+              <View className="p-2">
+                {(asgnQ.data?.assignments ?? []).length === 0 ? (
+                  <View className="px-3 py-6">
+                    <Text className="text-center text-sm text-ink-500">
+                      No team members assigned yet
+                    </Text>
+                  </View>
+                ) : (
+                  (asgnQ.data?.assignments ?? []).map((a) => (
+                    <View key={a.id} className="flex-row items-center p-2.5">
+                      <Avatar name={a.team_member.name} size="sm" />
+                      <View className="ml-3 flex-1">
+                        <Text className="text-sm font-semibold text-ink-900">{a.team_member.name}</Text>
+                        <Text className="text-xs text-ink-500">
+                          {a.role_on_event || a.team_member.role}
+                        </Text>
+                      </View>
+                      <Badge bgClassName="bg-ink-100" textClassName="text-ink-700">
+                        {a.status}
+                      </Badge>
+                    </View>
+                  ))
+                )}
+              </View>
+            </Card>
+          </MotiView>
+        )}
+      </ScrollView>
+    </Screen>
+  );
+}
