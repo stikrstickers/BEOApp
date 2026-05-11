@@ -6,20 +6,117 @@ from django.contrib.auth.models import User
 from django.db import models
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
+from django.utils.text import slugify
 
+
+# ===========================================================================
+# Tenancy — Organizations + Memberships
+# ===========================================================================
+#
+# Two kinds of users:
+#   1. Clients (no organization) — submit EventRequests via a public form.
+#      They can optionally create an account to track their submissions.
+#   2. Planners (belong to an Organization) — manage venues, inventory,
+#      vendors, events, calendars, branding, and billing.
+#
+# Every "operational" model (Inventory, TeamMember, Workflow, EventRequest as
+# received, EventAssignment) belongs to an Organization. Querysets must be
+# scoped by `organization=request.user.profile.organization` to prevent IDOR.
+# ===========================================================================
+
+
+class Organization(models.Model):
+    """A planner's workspace. Holds inventory, team, workflows, branding."""
+    name        = models.CharField(max_length=120)
+    slug        = models.SlugField(max_length=140, unique=True)
+    brand_color = models.CharField(max_length=9, default='#6366F1', help_text='Hex incl. leading #')
+    logo_url    = models.URLField(blank=True)
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            base = slugify(self.name) or 'org'
+            slug = base
+            n = 2
+            while Organization.objects.filter(slug=slug).exclude(pk=self.pk).exists():
+                slug = f'{base}-{n}'
+                n += 1
+            self.slug = slug
+        super().save(*args, **kwargs)
+
+
+class UserProfile(models.Model):
+    """Extends User with role + optional Organization membership."""
+    ROLE_CHOICES = [
+        ('client',  'Client'),       # Individual submitting event requests
+        ('planner', 'Event Planner'), # Belongs to an Organization
+    ]
+    user         = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
+    role         = models.CharField(max_length=20, choices=ROLE_CHOICES, default='client')
+    organization = models.ForeignKey(
+        Organization, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='members',
+    )
+    full_name    = models.CharField(max_length=120, blank=True)
+    phone        = models.CharField(max_length=40, blank=True)
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.username} ({self.role})"
+
+
+# ===========================================================================
+# Authentication — opaque tokens with optional expiry
+# ===========================================================================
+
+class AuthToken(models.Model):
+    """Opaque token used as the Authorization: Token <key> bearer credential."""
+    key        = models.CharField(max_length=64, unique=True, db_index=True)
+    user       = models.ForeignKey(User, on_delete=models.CASCADE, related_name='auth_tokens')
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used  = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        if not self.key:
+            self.key = secrets.token_urlsafe(48)
+        super().save(*args, **kwargs)
+
+    def is_expired(self) -> bool:
+        if self.expires_at is None:
+            return False
+        return self.expires_at <= datetime.datetime.now(tz=datetime.timezone.utc)
+
+    def __str__(self):
+        return f"{self.user.username} / {self.key[:8]}…"
+
+
+# ===========================================================================
+# Legacy BEO PDF storage — predates auth, kept for the original PDF tooling.
+# ===========================================================================
 
 class BEOWeek(models.Model):
-    """
-    Represents one work week of BEO PDFs.
-    label      e.g. "Apr 13–19 2026"
-    week_start Monday of that week (used for ordering & pruning)
-    """
+    """One work week of BEO PDFs (legacy PDF tool). Org-scoped."""
+    organization = models.ForeignKey(
+        Organization, null=True, blank=True,
+        on_delete=models.CASCADE, related_name='beo_weeks',
+    )
     label      = models.CharField(max_length=64)
-    week_start = models.DateField(unique=True)
+    week_start = models.DateField()
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['week_start']
+        unique_together = [('organization', 'week_start')]
 
     def __str__(self):
         return self.label
@@ -40,16 +137,17 @@ class BEOWeek(models.Model):
         )
 
     @classmethod
-    def get_or_create_for_week(cls, week_start: datetime.date):
+    def get_or_create_for_week(cls, week_start: datetime.date, organization=None):
         label = cls.make_label(week_start)
         obj, _ = cls.objects.get_or_create(
             week_start=week_start,
+            organization=organization,
             defaults={'label': label},
         )
         return obj
 
     @classmethod
-    def prune_old_weeks(cls):
+    def prune_old_weeks(cls, organization=None):
         """Keep only 3 weeks: previous, current, next. Delete everything else."""
         today = datetime.date.today()
         mon   = today - datetime.timedelta(days=today.weekday())
@@ -58,14 +156,17 @@ class BEOWeek(models.Model):
             mon,
             mon + datetime.timedelta(weeks=1),
         ]
-        cls.objects.exclude(week_start__in=keep_starts).delete()
+        qs = cls.objects.exclude(week_start__in=keep_starts)
+        if organization is not None:
+            qs = qs.filter(organization=organization)
+        qs.delete()
 
 
 class BEOWeekFile(models.Model):
     """A single PDF file stored for a week."""
-    week      = models.ForeignKey(BEOWeek, on_delete=models.CASCADE, related_name='files')
-    file_name = models.CharField(max_length=255)
-    file_data = models.BinaryField()
+    week        = models.ForeignKey(BEOWeek, on_delete=models.CASCADE, related_name='files')
+    file_name   = models.CharField(max_length=255)
+    file_data   = models.BinaryField()
     uploaded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -75,8 +176,12 @@ class BEOWeekFile(models.Model):
         return f"{self.week.label} / {self.file_name}"
 
 
+# ===========================================================================
+# Event Requests — submitted publicly by clients to a planner org
+# ===========================================================================
+
 class EventRequest(models.Model):
-    """An event request submitted by a client via the Client form."""
+    """An event request submitted by a client via the public Client form."""
 
     EVENT_TYPE_CHOICES = [
         ('corporate',  'Corporate'),
@@ -106,12 +211,35 @@ class EventRequest(models.Model):
         ('declined',  'Declined'),
         ('completed', 'Completed'),
     ]
+    # Forward transitions only. Unknown source means "from new". Planners can
+    # always re-open by going back to in_review, but can never resurrect a
+    # declined or completed request without an explicit re-submit.
+    STATUS_TRANSITIONS = {
+        'new':       {'in_review', 'confirmed', 'declined'},
+        'in_review': {'confirmed', 'declined', 'new'},
+        'confirmed': {'completed', 'declined', 'in_review'},
+        'declined':  set(),  # terminal
+        'completed': set(),  # terminal
+    }
 
-    # Client contact
+    # Tenancy — which planner org received this request
+    organization = models.ForeignKey(
+        Organization, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='event_requests',
+        help_text='Planner org receiving the request. Null = legacy/unrouted.',
+    )
+    client_user  = models.ForeignKey(
+        User, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='submitted_requests',
+        help_text='Set if a logged-in client submitted; null for anonymous.',
+    )
+
+    # Client contact (always captured even for logged-in clients)
     client_name   = models.CharField(max_length=120)
     client_email  = models.EmailField()
     client_phone  = models.CharField(max_length=40, blank=True)
-    organization  = models.CharField(max_length=120, blank=True)
+    client_org    = models.CharField(max_length=120, blank=True,
+                                     help_text="Client's company name (free text)")
 
     # Event basics
     event_name     = models.CharField(max_length=200)
@@ -140,60 +268,52 @@ class EventRequest(models.Model):
 
     class Meta:
         ordering = ['-submitted_at']
+        indexes = [
+            models.Index(fields=['organization', 'status']),
+            models.Index(fields=['organization', '-submitted_at']),
+        ]
 
     def __str__(self):
         return f"{self.event_name} ({self.client_name}) — {self.preferred_date}"
 
-
-# ---------------------------------------------------------------------------
-# Authentication — simple opaque tokens on top of Django's User model
-# ---------------------------------------------------------------------------
-
-class AuthToken(models.Model):
-    """Opaque token used as the Authorization: Token <key> bearer credential."""
-    key        = models.CharField(max_length=64, unique=True, db_index=True)
-    user       = models.ForeignKey(User, on_delete=models.CASCADE, related_name='auth_tokens')
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ['-created_at']
-
-    def save(self, *args, **kwargs):
-        if not self.key:
-            self.key = secrets.token_hex(32)
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"{self.user.username} / {self.key[:8]}…"
+    @classmethod
+    def can_transition(cls, from_status: str, to_status: str) -> bool:
+        if from_status == to_status:
+            return True
+        return to_status in cls.STATUS_TRANSITIONS.get(from_status, set())
 
 
-# ---------------------------------------------------------------------------
-# Inventory + Pricing — unified item ledger
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Inventory + Pricing — unified org-scoped item ledger
+# ===========================================================================
 
 class InventoryItem(models.Model):
     CATEGORY_CHOICES = [
-        ('table',    'Tables'),
-        ('chair',    'Chairs'),
-        ('food',     'Food'),
-        ('beverage', 'Beverages'),
-        ('av',       'A/V Equipment'),
-        ('linen',    'Linens'),
+        ('table',       'Tables'),
+        ('chair',       'Chairs'),
+        ('food',        'Food'),
+        ('beverage',    'Beverages'),
+        ('av',          'A/V Equipment'),
+        ('linen',       'Linens'),
         ('serviceware', 'Serviceware'),
-        ('other',    'Other'),
+        ('other',       'Other'),
     ]
-    name       = models.CharField(max_length=120)
-    category   = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='other')
-    unit       = models.CharField(max_length=40, blank=True, help_text='each, lb, gallon, etc.')
+    organization        = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='inventory_items',
+    )
+    name                = models.CharField(max_length=120)
+    category            = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='other')
+    unit                = models.CharField(max_length=40, blank=True, help_text='each, lb, gallon, etc.')
     quantity_on_hand    = models.PositiveIntegerField(default=0)
     unit_price          = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     low_stock_threshold = models.PositiveIntegerField(default=0)
-    notes      = models.TextField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    notes               = models.TextField(blank=True)
+    created_at          = models.DateTimeField(auto_now_add=True)
+    updated_at          = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['category', 'name']
+        indexes = [models.Index(fields=['organization', 'category'])]
 
     def __str__(self):
         return f"{self.name} ({self.get_category_display()})"
@@ -203,9 +323,9 @@ class InventoryItem(models.Model):
         return self.quantity_on_hand <= self.low_stock_threshold
 
 
-# ---------------------------------------------------------------------------
-# Team Builder — roster + per-event assignments
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Team Builder — org-scoped roster + per-event assignments
+# ===========================================================================
 
 class TeamMember(models.Model):
     ROLE_CHOICES = [
@@ -219,17 +339,21 @@ class TeamMember(models.Model):
         ('vendor',      'Vendor'),
         ('other',       'Other'),
     ]
-    name      = models.CharField(max_length=120)
-    email     = models.EmailField(blank=True)
-    phone     = models.CharField(max_length=40, blank=True)
-    role      = models.CharField(max_length=20, choices=ROLE_CHOICES, default='other')
-    is_vendor = models.BooleanField(default=False)
-    company   = models.CharField(max_length=120, blank=True, help_text='For third-party vendors')
-    notes     = models.TextField(blank=True)
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='team_members',
+    )
+    name       = models.CharField(max_length=120)
+    email      = models.EmailField(blank=True)
+    phone      = models.CharField(max_length=40, blank=True)
+    role       = models.CharField(max_length=20, choices=ROLE_CHOICES, default='other')
+    is_vendor  = models.BooleanField(default=False)
+    company    = models.CharField(max_length=120, blank=True, help_text='For third-party vendors')
+    notes      = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['name']
+        indexes = [models.Index(fields=['organization', 'role'])]
 
     def __str__(self):
         return f"{self.name} ({self.get_role_display()})"
@@ -256,9 +380,9 @@ class EventAssignment(models.Model):
         return f"{self.team_member.name} → {self.event_request.event_name}"
 
 
-# ---------------------------------------------------------------------------
-# Workflows — customizable post-event actions
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Workflows — customizable post-event automation, org-scoped
+# ===========================================================================
 
 class Workflow(models.Model):
     """An organizer-defined automation that fires on an EventRequest lifecycle event."""
@@ -270,6 +394,9 @@ class Workflow(models.Model):
         ('on_status_declined',   'Status changed → Declined'),
         ('on_status_completed',  'Status changed → Completed'),
     ]
+    organization = models.ForeignKey(
+        Organization, on_delete=models.CASCADE, related_name='workflows',
+    )
     name       = models.CharField(max_length=120)
     trigger    = models.CharField(max_length=40, choices=TRIGGER_CHOICES)
     is_active  = models.BooleanField(default=True)
@@ -278,6 +405,7 @@ class Workflow(models.Model):
 
     class Meta:
         ordering = ['name']
+        indexes = [models.Index(fields=['organization', 'trigger', 'is_active'])]
 
     def __str__(self):
         return f"{self.name} [{self.get_trigger_display()}]"
@@ -308,23 +436,39 @@ class WorkflowAction(models.Model):
 
 class WorkflowRun(models.Model):
     """Audit log of a single workflow execution against an event request."""
-    workflow      = models.ForeignKey(Workflow,     on_delete=models.CASCADE, related_name='runs')
-    event_request = models.ForeignKey(EventRequest, on_delete=models.CASCADE, related_name='workflow_runs')
-    ran_at        = models.DateTimeField(auto_now_add=True)
-    success       = models.BooleanField(default=True)
-    log           = models.TextField(blank=True)
+    workflow      = models.ForeignKey(
+        Workflow, null=True,
+        on_delete=models.SET_NULL, related_name='runs',
+        help_text='Null if the source workflow has since been deleted.',
+    )
+    workflow_name = models.CharField(max_length=120, blank=True,
+                                     help_text='Snapshot of workflow.name at run time.')
+    event_request = models.ForeignKey(
+        EventRequest, null=True,
+        on_delete=models.SET_NULL, related_name='workflow_runs',
+        help_text='Null if the event request has since been deleted.',
+    )
+    organization  = models.ForeignKey(
+        Organization, null=True,
+        on_delete=models.SET_NULL, related_name='workflow_runs',
+    )
+    ran_at  = models.DateTimeField(auto_now_add=True)
+    success = models.BooleanField(default=True)
+    log     = models.TextField(blank=True)
 
     class Meta:
         ordering = ['-ran_at']
 
     def __str__(self):
         mark = '✓' if self.success else '✗'
-        return f"{mark} {self.workflow.name} on {self.event_request.event_name}"
+        name = self.workflow_name or (self.workflow.name if self.workflow else '<deleted>')
+        evt  = self.event_request.event_name if self.event_request else '<deleted>'
+        return f"{mark} {name} on {evt}"
 
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # EventRequest lifecycle → workflow trigger
-# ---------------------------------------------------------------------------
+# ===========================================================================
 
 @receiver(pre_save, sender=EventRequest)
 def _capture_previous_status(sender, instance, **kwargs):
@@ -341,7 +485,7 @@ def _capture_previous_status(sender, instance, **kwargs):
 @receiver(post_save, sender=EventRequest)
 def _run_event_request_workflows(sender, instance, created, **kwargs):
     """Fire matching Workflows when an EventRequest is created or its status changes."""
-    # Lazy import to avoid circular dependency with workflow runner in views/services.
+    # Lazy import to avoid circular dependency with workflow runner.
     from .workflows import run_workflows_for_event
 
     if created:
@@ -349,3 +493,13 @@ def _run_event_request_workflows(sender, instance, created, **kwargs):
     previous = getattr(instance, '_previous_status', None)
     if previous is not None and previous != instance.status:
         run_workflows_for_event(instance, trigger=f'on_status_{instance.status}')
+
+
+# ===========================================================================
+# Auto-create UserProfile on User creation
+# ===========================================================================
+
+@receiver(post_save, sender=User)
+def _create_user_profile(sender, instance, created, **kwargs):
+    if created and not hasattr(instance, 'profile'):
+        UserProfile.objects.create(user=instance)

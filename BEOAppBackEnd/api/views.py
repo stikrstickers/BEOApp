@@ -1251,12 +1251,33 @@ def _extract_with_pymupdf(pdf_bytes: bytes) -> list:
     return pages_data
 
 
-# ---------------------------------------------------------------------------
-# Event Request endpoints — client form + organizer dashboard
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Shared helpers — body parsing + serializers + coercers
+# ===========================================================================
+
+def _parse_body(request) -> dict:
+    """Accept either JSON or form-encoded bodies."""
+    ctype = request.META.get('CONTENT_TYPE', '')
+    if 'application/json' in ctype:
+        try:
+            return json.loads(request.body.decode('utf-8') or '{}')
+        except json.JSONDecodeError:
+            return {}
+    return {k: v for k, v in request.POST.items()}
+
+
+def _serialize_organization(org: 'Organization') -> dict:  # noqa: F821 — lazy ref
+    return {
+        'id':          org.pk,
+        'name':        org.name,
+        'slug':        org.slug,
+        'brand_color': org.brand_color,
+        'logo_url':    org.logo_url,
+    }
+
 
 _EVENT_REQUEST_CLIENT_FIELDS = {
-    'client_name', 'client_email', 'client_phone', 'organization',
+    'client_name', 'client_email', 'client_phone', 'client_org',
     'event_name', 'event_type', 'preferred_date', 'alternate_date',
     'start_time', 'end_time', 'headcount',
     'venue_preference', 'food_service', 'dietary_notes', 'tech_needs',
@@ -1268,13 +1289,13 @@ _EVENT_REQUEST_REQUIRED = {
 }
 
 
-def _serialize_event_request(er: EventRequest) -> dict:
-    return {
+def _serialize_event_request(er: EventRequest, *, include_org: bool = False) -> dict:
+    out = {
         'id':               er.pk,
         'client_name':      er.client_name,
         'client_email':     er.client_email,
         'client_phone':     er.client_phone,
-        'organization':     er.organization,
+        'client_org':       er.client_org,
         'event_name':       er.event_name,
         'event_type':       er.event_type,
         'preferred_date':   er.preferred_date.isoformat() if er.preferred_date else None,
@@ -1293,17 +1314,9 @@ def _serialize_event_request(er: EventRequest) -> dict:
         'submitted_at':     er.submitted_at.isoformat(),
         'updated_at':       er.updated_at.isoformat(),
     }
-
-
-def _parse_body(request) -> dict:
-    """Accept either JSON or form-encoded bodies."""
-    ctype = request.META.get('CONTENT_TYPE', '')
-    if 'application/json' in ctype:
-        try:
-            return json.loads(request.body.decode('utf-8') or '{}')
-        except json.JSONDecodeError:
-            return {}
-    return {k: v for k, v in request.POST.items()}
+    if include_org and er.organization_id:
+        out['organization'] = _serialize_organization(er.organization)
+    return out
 
 
 def _coerce_event_request_payload(data: dict) -> dict:
@@ -1323,10 +1336,19 @@ def _coerce_event_request_payload(data: dict) -> dict:
     for key in ('start_time', 'end_time'):
         if key in out:
             try:
-                # Accept "HH:MM" or "HH:MM:SS"
                 out[key] = _dt.time.fromisoformat(out[key])
             except (TypeError, ValueError):
                 raise ValueError(f'{key} must be HH:MM')
+
+    # Cross-field validation: end_time > start_time
+    if 'start_time' in out and 'end_time' in out:
+        if out['end_time'] <= out['start_time']:
+            raise ValueError('end_time must be after start_time')
+
+    # Date sanity: preferred_date cannot be in the past
+    if 'preferred_date' in out:
+        if out['preferred_date'] < _dt.date.today():
+            raise ValueError('preferred_date cannot be in the past')
 
     if 'headcount' in out:
         try:
@@ -1343,88 +1365,46 @@ def _coerce_event_request_payload(data: dict) -> dict:
     return out
 
 
-@csrf_exempt
-def event_requests(request):
-    """
-    GET  /api/event-requests/      → organizer dashboard list
-    POST /api/event-requests/      → client form submission (no auth)
-    """
-    if request.method == 'GET':
-        status_filter = request.GET.get('status') or None
-        qs = EventRequest.objects.all()
-        if status_filter:
-            qs = qs.filter(status=status_filter)
-        return JsonResponse({
-            'requests': [_serialize_event_request(er) for er in qs],
-        })
-
-    if request.method == 'POST':
-        data = _parse_body(request)
-        missing = _EVENT_REQUEST_REQUIRED - {k for k, v in data.items() if v not in (None, '')}
-        if missing:
-            return JsonResponse(
-                {'error': 'Missing required fields', 'fields': sorted(missing)},
-                status=400,
-            )
-        try:
-            payload = _coerce_event_request_payload(data)
-        except ValueError as e:
-            return JsonResponse({'error': str(e)}, status=400)
-
-        er = EventRequest.objects.create(**payload)
-        return JsonResponse({'request': _serialize_event_request(er)}, status=201)
-
-    return JsonResponse({'error': 'Method not allowed'}, status=405)
-
-
-@csrf_exempt
-def event_request_detail(request, request_id):
-    """
-    GET   /api/event-requests/<id>/  → single request
-    PATCH /api/event-requests/<id>/  → organizer update (status, organizer_note)
-    DELETE /api/event-requests/<id>/ → remove
-    """
-    try:
-        er = EventRequest.objects.get(pk=request_id)
-    except EventRequest.DoesNotExist:
-        return JsonResponse({'error': 'Not found'}, status=404)
-
-    if request.method == 'GET':
-        return JsonResponse({'request': _serialize_event_request(er)})
-
-    if request.method == 'PATCH':
-        data = _parse_body(request)
-        # Organizer can update status + organizer_note. Anything else is ignored
-        # to keep the client-submitted record immutable.
-        if 'status' in data:
-            valid = {c[0] for c in EventRequest.STATUS_CHOICES}
-            if data['status'] not in valid:
-                return JsonResponse({'error': f'status must be one of {sorted(valid)}'}, status=400)
-            er.status = data['status']
-        if 'organizer_note' in data:
-            er.organizer_note = data['organizer_note']
-        er.save()
-        return JsonResponse({'request': _serialize_event_request(er)})
-
-    if request.method == 'DELETE':
-        er.delete()
-        return JsonResponse({'deleted': request_id})
-
-    return JsonResponse({'error': 'Method not allowed'}, status=405)
-
-
 # ===========================================================================
-# Authentication
+# Authentication & tenancy
 # ===========================================================================
 
 def _serialize_user(user: User) -> dict:
     name = (user.first_name + ' ' + user.last_name).strip() or user.username
-    return {
+    profile = getattr(user, 'profile', None)
+    payload = {
         'id':       user.pk,
         'email':    user.email,
         'username': user.username,
         'name':     name,
+        'role':     profile.role if profile else 'client',
     }
+    if profile and profile.organization_id:
+        payload['organization'] = _serialize_organization(profile.organization)
+    return payload
+
+
+def _issue_token(user: User) -> 'AuthToken':
+    """Reuse a live token if one exists, else mint a new one. Refresh expiry."""
+    from django.conf import settings as dj_settings
+    now = _dt.datetime.now(tz=_dt.timezone.utc)
+    ttl_days = getattr(dj_settings, 'AUTH_TOKEN_TTL_DAYS', 30)
+    expires = now + _dt.timedelta(days=ttl_days)
+
+    tok = (
+        AuthToken.objects
+        .filter(user=user)
+        .order_by('-created_at')
+        .first()
+    )
+    if tok and not tok.is_expired():
+        tok.expires_at = expires
+        tok.last_used  = now
+        tok.save(update_fields=['expires_at', 'last_used'])
+        return tok
+    # Clean up any expired tokens; mint a fresh one.
+    AuthToken.objects.filter(user=user, expires_at__lt=now).delete()
+    return AuthToken.objects.create(user=user, expires_at=expires, last_used=now)
 
 
 def auth_required(view):
@@ -1436,11 +1416,37 @@ def auth_required(view):
             return JsonResponse({'error': 'Authentication required'}, status=401)
         key = header[len('Token '):].strip()
         try:
-            tok = AuthToken.objects.select_related('user').get(key=key)
+            tok = (
+                AuthToken.objects
+                .select_related('user', 'user__profile', 'user__profile__organization')
+                .get(key=key)
+            )
         except AuthToken.DoesNotExist:
             return JsonResponse({'error': 'Invalid token'}, status=401)
+        if tok.is_expired():
+            return JsonResponse({'error': 'Token expired'}, status=401)
         request.user = tok.user
         request.auth_token = tok
+        # Refresh last_used opportunistically (cheap single-row update).
+        AuthToken.objects.filter(pk=tok.pk).update(
+            last_used=_dt.datetime.now(tz=_dt.timezone.utc),
+        )
+        return view(request, *args, **kwargs)
+    return wrapped
+
+
+def planner_required(view):
+    """Decorator: must be authenticated AND belong to an Organization (planner)."""
+    @auth_required
+    @functools.wraps(view)
+    def wrapped(request, *args, **kwargs):
+        profile = getattr(request.user, 'profile', None)
+        if profile is None or profile.organization_id is None:
+            return JsonResponse(
+                {'error': 'This endpoint requires a planner account with an organization.'},
+                status=403,
+            )
+        request.organization = profile.organization
         return view(request, *args, **kwargs)
     return wrapped
 
@@ -1448,14 +1454,35 @@ def auth_required(view):
 @csrf_exempt
 @require_http_methods(['POST'])
 def auth_register(request):
+    """
+    Create a User and (optionally) a brand-new Organization.
+
+    Body:
+      email, password, name           (required)
+      role        = 'client'|'planner'   (default 'client')
+      org_name    = '<Workspace name>'    (required when role='planner')
+      brand_color = '#RRGGBB'             (optional, planner only)
+    """
+    from .models import Organization, UserProfile
+
     data = _parse_body(request)
     email    = (data.get('email') or '').strip().lower()
     password = data.get('password') or ''
     name     = (data.get('name') or '').strip()
+    role     = (data.get('role') or 'client').strip().lower()
+    org_name = (data.get('org_name') or '').strip()
+
+    if role not in ('client', 'planner'):
+        return JsonResponse({'error': "role must be 'client' or 'planner'"}, status=400)
     if not email or not password:
         return JsonResponse({'error': 'email and password are required'}, status=400)
+    if '@' not in email or '.' not in email.split('@')[-1]:
+        return JsonResponse({'error': 'Please enter a valid email address'}, status=400)
     if len(password) < 8:
         return JsonResponse({'error': 'password must be at least 8 characters'}, status=400)
+    if role == 'planner' and not org_name:
+        return JsonResponse({'error': "org_name is required when role='planner'"}, status=400)
+
     try:
         user = User.objects.create_user(username=email, email=email, password=password)
     except IntegrityError:
@@ -1465,7 +1492,22 @@ def auth_register(request):
         user.first_name = parts[0]
         user.last_name  = parts[1] if len(parts) > 1 else ''
         user.save(update_fields=['first_name', 'last_name'])
-    tok = AuthToken.objects.create(user=user)
+
+    # UserProfile is auto-created by signal; fetch + populate it.
+    profile = UserProfile.objects.get(user=user)
+    profile.role = role
+    profile.full_name = name
+    if role == 'planner':
+        org = Organization.objects.create(
+            name=org_name,
+            brand_color=(data.get('brand_color') or '#6366F1'),
+        )
+        profile.organization = org
+    profile.save()
+
+    tok = _issue_token(user)
+    # Re-fetch user with profile so the serializer sees the org membership.
+    user = User.objects.select_related('profile', 'profile__organization').get(pk=user.pk)
     return JsonResponse({'token': tok.key, 'user': _serialize_user(user)}, status=201)
 
 
@@ -1477,11 +1519,11 @@ def auth_login(request):
     password = data.get('password') or ''
     if not email or not password:
         return JsonResponse({'error': 'email and password are required'}, status=400)
-    # Username = email in our register flow, so authenticate() works directly.
     user = authenticate(username=email, password=password)
     if user is None:
         return JsonResponse({'error': 'Invalid credentials'}, status=401)
-    tok = AuthToken.objects.create(user=user)
+    tok = _issue_token(user)
+    user = User.objects.select_related('profile', 'profile__organization').get(pk=user.pk)
     return JsonResponse({'token': tok.key, 'user': _serialize_user(user)})
 
 
@@ -1496,7 +1538,8 @@ def auth_logout(request):
 @require_http_methods(['GET'])
 @auth_required
 def auth_me(request):
-    return JsonResponse({'user': _serialize_user(request.user)})
+    user = User.objects.select_related('profile', 'profile__organization').get(pk=request.user.pk)
+    return JsonResponse({'user': _serialize_user(user)})
 
 
 _OAUTH_PROVIDERS = ('google', 'outlook', 'github')
@@ -1504,12 +1547,7 @@ _OAUTH_PROVIDERS = ('google', 'outlook', 'github')
 
 @csrf_exempt
 def auth_oauth_start(request, provider):
-    """OAuth scaffold — returns 501 until provider client IDs are configured.
-
-    To activate: register an OAuth app with the provider, then store
-    {client_id, client_secret, redirect_uri} in Django settings under
-    OAUTH_PROVIDERS[provider] and implement the redirect + callback here.
-    """
+    """OAuth scaffold — returns 501 until provider client IDs are configured."""
     if provider not in _OAUTH_PROVIDERS:
         return JsonResponse({'error': f'Unknown provider; choose one of {list(_OAUTH_PROVIDERS)}'}, status=400)
     return JsonResponse({
@@ -1520,7 +1558,152 @@ def auth_oauth_start(request, provider):
 
 
 # ===========================================================================
-# Inventory + Pricing
+# Organizations — public lookup + planner-only management
+# ===========================================================================
+
+@require_http_methods(['GET'])
+def organization_public(request, slug):
+    """Public org lookup by slug. Used by the client form to know who they're
+    submitting to (name, brand color, logo). Does not require auth."""
+    from .models import Organization
+    try:
+        org = Organization.objects.get(slug=slug)
+    except Organization.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+    return JsonResponse({'organization': _serialize_organization(org)})
+
+
+@csrf_exempt
+@planner_required
+def organization_current(request):
+    """GET/PATCH the caller's own organization (planner only)."""
+    org = request.organization
+    if request.method == 'GET':
+        return JsonResponse({'organization': _serialize_organization(org)})
+    if request.method == 'PATCH':
+        data = _parse_body(request)
+        if 'name' in data:
+            org.name = (data['name'] or '').strip() or org.name
+        if 'brand_color' in data:
+            org.brand_color = data['brand_color'] or org.brand_color
+        if 'logo_url' in data:
+            org.logo_url = data['logo_url'] or ''
+        org.save()
+        return JsonResponse({'organization': _serialize_organization(org)})
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+# ===========================================================================
+# Event Requests — public client form (per planner-org slug) + org dashboard
+# ===========================================================================
+
+@csrf_exempt
+@require_http_methods(['POST'])
+def event_request_org_submit(request, slug):
+    """
+    Public endpoint: a client submits a new event request to a specific planner.
+    No auth required. The org is resolved from the URL slug; client_user is set
+    if a token happens to be present (logged-in client) but is optional.
+    """
+    from .models import Organization
+    try:
+        org = Organization.objects.get(slug=slug)
+    except Organization.DoesNotExist:
+        return JsonResponse({'error': 'Organization not found'}, status=404)
+
+    data = _parse_body(request)
+    missing = _EVENT_REQUEST_REQUIRED - {k for k, v in data.items() if v not in (None, '')}
+    if missing:
+        return JsonResponse({'error': 'Missing required fields', 'fields': sorted(missing)}, status=400)
+    try:
+        payload = _coerce_event_request_payload(data)
+    except ValueError as e:
+        return JsonResponse({'error': str(e)}, status=400)
+
+    # Optional: associate with logged-in client user, if a token came along.
+    client_user = None
+    header = request.META.get('HTTP_AUTHORIZATION', '')
+    if header.startswith('Token '):
+        try:
+            tok = AuthToken.objects.select_related('user').get(key=header[len('Token '):].strip())
+            if not tok.is_expired():
+                client_user = tok.user
+        except AuthToken.DoesNotExist:
+            pass
+
+    er = EventRequest.objects.create(organization=org, client_user=client_user, **payload)
+    return JsonResponse({'request': _serialize_event_request(er)}, status=201)
+
+
+@csrf_exempt
+@planner_required
+def event_requests(request):
+    """GET list / POST create — scoped to the caller's organization."""
+    if request.method == 'GET':
+        qs = EventRequest.objects.filter(organization=request.organization)
+        status_filter = request.GET.get('status') or None
+        if status_filter:
+            valid = {c[0] for c in EventRequest.STATUS_CHOICES}
+            if status_filter not in valid:
+                return JsonResponse({'error': f'status must be one of {sorted(valid)}'}, status=400)
+            qs = qs.filter(status=status_filter)
+        return JsonResponse({'requests': [_serialize_event_request(er) for er in qs]})
+
+    if request.method == 'POST':
+        # Planner-created request (org adds an event on the client's behalf).
+        data = _parse_body(request)
+        missing = _EVENT_REQUEST_REQUIRED - {k for k, v in data.items() if v not in (None, '')}
+        if missing:
+            return JsonResponse({'error': 'Missing required fields', 'fields': sorted(missing)}, status=400)
+        try:
+            payload = _coerce_event_request_payload(data)
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        er = EventRequest.objects.create(organization=request.organization, **payload)
+        return JsonResponse({'request': _serialize_event_request(er)}, status=201)
+
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+@planner_required
+def event_request_detail(request, request_id):
+    """Org-scoped detail. PATCH validates the status state machine."""
+    try:
+        er = EventRequest.objects.get(pk=request_id, organization=request.organization)
+    except EventRequest.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+
+    if request.method == 'GET':
+        return JsonResponse({'request': _serialize_event_request(er)})
+
+    if request.method == 'PATCH':
+        data = _parse_body(request)
+        if 'status' in data:
+            new = data['status']
+            valid = {c[0] for c in EventRequest.STATUS_CHOICES}
+            if new not in valid:
+                return JsonResponse({'error': f'status must be one of {sorted(valid)}'}, status=400)
+            if not EventRequest.can_transition(er.status, new):
+                return JsonResponse(
+                    {'error': f'cannot transition from {er.status} to {new}'},
+                    status=409,
+                )
+            er.status = new
+        if 'organizer_note' in data:
+            er.organizer_note = data['organizer_note']
+        er.save()
+        return JsonResponse({'request': _serialize_event_request(er)})
+
+    if request.method == 'DELETE':
+        er.delete()
+        return JsonResponse({'deleted': request_id})
+
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+# ===========================================================================
+# Inventory + Pricing — org-scoped
 # ===========================================================================
 
 _INVENTORY_FIELDS = {
@@ -1559,9 +1742,12 @@ def _coerce_inventory_payload(data: dict, partial: bool = False) -> dict:
                 raise ValueError(f'{k} must be a non-negative integer')
     if 'unit_price' in out:
         try:
-            out['unit_price'] = Decimal(str(out['unit_price']))
-        except (InvalidOperation, TypeError):
-            raise ValueError('unit_price must be a decimal number')
+            price = Decimal(str(out['unit_price']))
+            if price < 0:
+                raise ValueError
+            out['unit_price'] = price
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError('unit_price must be a non-negative decimal')
     if not partial:
         if not out.get('name'):
             raise ValueError('name is required')
@@ -1569,10 +1755,10 @@ def _coerce_inventory_payload(data: dict, partial: bool = False) -> dict:
 
 
 @csrf_exempt
-@auth_required
+@planner_required
 def inventory_list(request):
     if request.method == 'GET':
-        qs = InventoryItem.objects.all()
+        qs = InventoryItem.objects.filter(organization=request.organization)
         category = request.GET.get('category')
         if category:
             qs = qs.filter(category=category)
@@ -1583,17 +1769,17 @@ def inventory_list(request):
             payload = _coerce_inventory_payload(_parse_body(request))
         except ValueError as e:
             return JsonResponse({'error': str(e)}, status=400)
-        item = InventoryItem.objects.create(**payload)
+        item = InventoryItem.objects.create(organization=request.organization, **payload)
         return JsonResponse({'item': _serialize_inventory(item)}, status=201)
 
     return JsonResponse({'error': 'Method not allowed'}, status=405)
 
 
 @csrf_exempt
-@auth_required
+@planner_required
 def inventory_detail(request, item_id):
     try:
-        item = InventoryItem.objects.get(pk=item_id)
+        item = InventoryItem.objects.get(pk=item_id, organization=request.organization)
     except InventoryItem.DoesNotExist:
         return JsonResponse({'error': 'Not found'}, status=404)
 
@@ -1652,10 +1838,10 @@ def _coerce_team_payload(data: dict, partial: bool = False) -> dict:
 
 
 @csrf_exempt
-@auth_required
+@planner_required
 def team_list(request):
     if request.method == 'GET':
-        qs = TeamMember.objects.all()
+        qs = TeamMember.objects.filter(organization=request.organization)
         role = request.GET.get('role')
         if role:
             qs = qs.filter(role=role)
@@ -1665,16 +1851,16 @@ def team_list(request):
             payload = _coerce_team_payload(_parse_body(request))
         except ValueError as e:
             return JsonResponse({'error': str(e)}, status=400)
-        m = TeamMember.objects.create(**payload)
+        m = TeamMember.objects.create(organization=request.organization, **payload)
         return JsonResponse({'member': _serialize_team_member(m)}, status=201)
     return JsonResponse({'error': 'Method not allowed'}, status=405)
 
 
 @csrf_exempt
-@auth_required
+@planner_required
 def team_detail(request, member_id):
     try:
-        m = TeamMember.objects.get(pk=member_id)
+        m = TeamMember.objects.get(pk=member_id, organization=request.organization)
     except TeamMember.DoesNotExist:
         return JsonResponse({'error': 'Not found'}, status=404)
     if request.method == 'GET':
@@ -1707,10 +1893,10 @@ def _serialize_assignment(a: EventAssignment) -> dict:
 
 
 @csrf_exempt
-@auth_required
+@planner_required
 def event_assignments(request, request_id):
     try:
-        er = EventRequest.objects.get(pk=request_id)
+        er = EventRequest.objects.get(pk=request_id, organization=request.organization)
     except EventRequest.DoesNotExist:
         return JsonResponse({'error': 'Event request not found'}, status=404)
 
@@ -1724,7 +1910,7 @@ def event_assignments(request, request_id):
         if not tm_id:
             return JsonResponse({'error': 'team_member id required'}, status=400)
         try:
-            tm = TeamMember.objects.get(pk=int(tm_id))
+            tm = TeamMember.objects.get(pk=int(tm_id), organization=request.organization)
         except (TeamMember.DoesNotExist, ValueError, TypeError):
             return JsonResponse({'error': 'team_member not found'}, status=404)
         role_on_event = (data.get('role_on_event') or '').strip()
@@ -1743,10 +1929,14 @@ def event_assignments(request, request_id):
 
 
 @csrf_exempt
-@auth_required
+@planner_required
 def assignment_detail(request, assignment_id):
     try:
-        a = EventAssignment.objects.select_related('team_member').get(pk=assignment_id)
+        a = (
+            EventAssignment.objects
+            .select_related('team_member', 'event_request')
+            .get(pk=assignment_id, event_request__organization=request.organization)
+        )
     except EventAssignment.DoesNotExist:
         return JsonResponse({'error': 'Not found'}, status=404)
 
@@ -1798,10 +1988,10 @@ def _serialize_workflow(w: Workflow) -> dict:
 
 
 @csrf_exempt
-@auth_required
+@planner_required
 def workflow_list(request):
     if request.method == 'GET':
-        qs = Workflow.objects.prefetch_related('actions').all()
+        qs = Workflow.objects.filter(organization=request.organization).prefetch_related('actions')
         return JsonResponse({'workflows': [_serialize_workflow(w) for w in qs]})
     if request.method == 'POST':
         data = _parse_body(request)
@@ -1812,16 +2002,24 @@ def workflow_list(request):
             return JsonResponse({'error': 'name is required'}, status=400)
         if trigger not in valid_triggers:
             return JsonResponse({'error': f'trigger must be one of {sorted(valid_triggers)}'}, status=400)
-        w = Workflow.objects.create(name=name, trigger=trigger, is_active=bool(data.get('is_active', True)))
+        w = Workflow.objects.create(
+            organization=request.organization,
+            name=name, trigger=trigger,
+            is_active=bool(data.get('is_active', True)),
+        )
         return JsonResponse({'workflow': _serialize_workflow(w)}, status=201)
     return JsonResponse({'error': 'Method not allowed'}, status=405)
 
 
 @csrf_exempt
-@auth_required
+@planner_required
 def workflow_detail(request, workflow_id):
     try:
-        w = Workflow.objects.prefetch_related('actions').get(pk=workflow_id)
+        w = (
+            Workflow.objects
+            .prefetch_related('actions')
+            .get(pk=workflow_id, organization=request.organization)
+        )
     except Workflow.DoesNotExist:
         return JsonResponse({'error': 'Not found'}, status=404)
     if request.method == 'GET':
@@ -1847,11 +2045,11 @@ def workflow_detail(request, workflow_id):
 
 
 @csrf_exempt
-@auth_required
+@planner_required
 def workflow_actions(request, workflow_id):
     """POST adds an action to a workflow."""
     try:
-        w = Workflow.objects.get(pk=workflow_id)
+        w = Workflow.objects.get(pk=workflow_id, organization=request.organization)
     except Workflow.DoesNotExist:
         return JsonResponse({'error': 'Workflow not found'}, status=404)
     if request.method != 'POST':
@@ -1864,17 +2062,23 @@ def workflow_actions(request, workflow_id):
     config = data.get('config') or {}
     if not isinstance(config, dict):
         return JsonResponse({'error': 'config must be an object'}, status=400)
-    # Auto-increment order to the end of the list.
+    # Validate config shape per action_type so we catch garbage at save time.
+    try:
+        _validate_action_config(action_type, config)
+    except ValueError as e:
+        return JsonResponse({'error': str(e)}, status=400)
     next_order = (w.actions.aggregate(Max('order'))['order__max'] or 0) + 1
     a = WorkflowAction.objects.create(workflow=w, action_type=action_type, config=config, order=next_order)
     return JsonResponse({'action': _serialize_workflow_action(a)}, status=201)
 
 
 @csrf_exempt
-@auth_required
+@planner_required
 def workflow_action_detail(request, action_id):
     try:
-        a = WorkflowAction.objects.get(pk=action_id)
+        a = WorkflowAction.objects.select_related('workflow').get(
+            pk=action_id, workflow__organization=request.organization,
+        )
     except WorkflowAction.DoesNotExist:
         return JsonResponse({'error': 'Not found'}, status=404)
     if request.method == 'PATCH':
@@ -1893,6 +2097,10 @@ def workflow_action_detail(request, action_id):
             cfg = data['config']
             if not isinstance(cfg, dict):
                 return JsonResponse({'error': 'config must be an object'}, status=400)
+            try:
+                _validate_action_config(a.action_type, cfg)
+            except ValueError as e:
+                return JsonResponse({'error': str(e)}, status=400)
             a.config = cfg
         a.save()
         return JsonResponse({'action': _serialize_workflow_action(a)})
@@ -1902,11 +2110,27 @@ def workflow_action_detail(request, action_id):
     return JsonResponse({'error': 'Method not allowed'}, status=405)
 
 
+def _validate_action_config(action_type: str, cfg: dict) -> None:
+    """Sanity-check a WorkflowAction config dict. Raises ValueError on bad shape."""
+    if action_type == 'set_status':
+        valid = {c[0] for c in EventRequest.STATUS_CHOICES}
+        if cfg.get('status') not in valid:
+            raise ValueError(f"set_status.config.status must be one of {sorted(valid)}")
+    elif action_type == 'send_email':
+        if not cfg.get('to'):
+            raise ValueError('send_email.config.to is required (e.g. "client", "organizer", or an address)')
+        if not cfg.get('subject') and not cfg.get('body'):
+            raise ValueError('send_email needs a subject or body')
+    elif action_type == 'add_organizer_note':
+        if not cfg.get('text'):
+            raise ValueError('add_organizer_note.config.text is required')
+
+
 def _serialize_workflow_run(run: WorkflowRun) -> dict:
     return {
         'id':            run.pk,
         'workflow':      run.workflow_id,
-        'workflow_name': run.workflow.name,
+        'workflow_name': run.workflow_name or (run.workflow.name if run.workflow else ''),
         'event_request': run.event_request_id,
         'ran_at':        run.ran_at.isoformat(),
         'success':       run.success,
@@ -1915,9 +2139,17 @@ def _serialize_workflow_run(run: WorkflowRun) -> dict:
 
 
 @require_http_methods(['GET'])
-@auth_required
+@planner_required
 def event_workflow_runs(request, request_id):
-    runs = WorkflowRun.objects.filter(event_request_id=request_id).select_related('workflow')[:50]
+    # Org-scope through the event request to prevent IDOR.
+    if not EventRequest.objects.filter(pk=request_id, organization=request.organization).exists():
+        return JsonResponse({'error': 'Event request not found'}, status=404)
+    runs = (
+        WorkflowRun.objects
+        .filter(event_request_id=request_id, organization=request.organization)
+        .select_related('workflow')
+        [:50]
+    )
     return JsonResponse({'runs': [_serialize_workflow_run(r) for r in runs]})
 
 
@@ -1971,168 +2203,3 @@ def _extract_with_ocr(pdf_bytes: bytes, dpi: int = 200) -> list:
         pages_data.append({'page': i, 'lines': lines})
     doc.close()
     return pages_data
-
-
-# ---------------------------------------------------------------------------
-# Event Request endpoints — client form + organizer dashboard
-# ---------------------------------------------------------------------------
-
-import json
-import datetime as _dt
-
-
-_EVENT_REQUEST_CLIENT_FIELDS = {
-    'client_name', 'client_email', 'client_phone', 'organization',
-    'event_name', 'event_type', 'preferred_date', 'alternate_date',
-    'start_time', 'end_time', 'headcount',
-    'venue_preference', 'food_service', 'dietary_notes', 'tech_needs',
-    'rsvp_required', 'notes',
-}
-_EVENT_REQUEST_REQUIRED = {
-    'client_name', 'client_email', 'event_name', 'preferred_date',
-    'start_time', 'end_time', 'headcount',
-}
-
-
-def _serialize_event_request(er: EventRequest) -> dict:
-    return {
-        'id':               er.pk,
-        'client_name':      er.client_name,
-        'client_email':     er.client_email,
-        'client_phone':     er.client_phone,
-        'organization':     er.organization,
-        'event_name':       er.event_name,
-        'event_type':       er.event_type,
-        'preferred_date':   er.preferred_date.isoformat() if er.preferred_date else None,
-        'alternate_date':   er.alternate_date.isoformat() if er.alternate_date else None,
-        'start_time':       er.start_time.strftime('%H:%M') if er.start_time else None,
-        'end_time':         er.end_time.strftime('%H:%M') if er.end_time else None,
-        'headcount':        er.headcount,
-        'venue_preference': er.venue_preference,
-        'food_service':     er.food_service,
-        'dietary_notes':    er.dietary_notes,
-        'tech_needs':       er.tech_needs,
-        'rsvp_required':    er.rsvp_required,
-        'notes':            er.notes,
-        'status':           er.status,
-        'organizer_note':   er.organizer_note,
-        'submitted_at':     er.submitted_at.isoformat(),
-        'updated_at':       er.updated_at.isoformat(),
-    }
-
-
-def _parse_body(request) -> dict:
-    """Accept either JSON or form-encoded bodies."""
-    ctype = request.META.get('CONTENT_TYPE', '')
-    if 'application/json' in ctype:
-        try:
-            return json.loads(request.body.decode('utf-8') or '{}')
-        except json.JSONDecodeError:
-            return {}
-    return {k: v for k, v in request.POST.items()}
-
-
-def _coerce_event_request_payload(data: dict) -> dict:
-    """Parse/validate types. Raises ValueError on bad input."""
-    out = {}
-    for key in _EVENT_REQUEST_CLIENT_FIELDS:
-        if key in data and data[key] != '':
-            out[key] = data[key]
-
-    for key in ('preferred_date', 'alternate_date'):
-        if key in out:
-            try:
-                out[key] = _dt.date.fromisoformat(out[key])
-            except (TypeError, ValueError):
-                raise ValueError(f'{key} must be YYYY-MM-DD')
-
-    for key in ('start_time', 'end_time'):
-        if key in out:
-            try:
-                out[key] = _dt.time.fromisoformat(out[key])
-            except (TypeError, ValueError):
-                raise ValueError(f'{key} must be HH:MM')
-
-    if 'headcount' in out:
-        try:
-            out['headcount'] = int(out['headcount'])
-            if out['headcount'] < 1:
-                raise ValueError
-        except (TypeError, ValueError):
-            raise ValueError('headcount must be a positive integer')
-
-    if 'rsvp_required' in out:
-        v = out['rsvp_required']
-        out['rsvp_required'] = str(v).lower() in ('1', 'true', 'yes', 'on')
-
-    return out
-
-
-@csrf_exempt
-def event_requests(request):
-    """
-    GET  /api/event-requests/      → organizer dashboard list (optional ?status=)
-    POST /api/event-requests/      → client form submission (no auth yet)
-    """
-    if request.method == 'GET':
-        status_filter = request.GET.get('status') or None
-        qs = EventRequest.objects.all()
-        if status_filter:
-            qs = qs.filter(status=status_filter)
-        return JsonResponse({
-            'requests': [_serialize_event_request(er) for er in qs],
-        })
-
-    if request.method == 'POST':
-        data = _parse_body(request)
-        missing = _EVENT_REQUEST_REQUIRED - {k for k, v in data.items() if v not in (None, '')}
-        if missing:
-            return JsonResponse(
-                {'error': 'Missing required fields', 'fields': sorted(missing)},
-                status=400,
-            )
-        try:
-            payload = _coerce_event_request_payload(data)
-        except ValueError as e:
-            return JsonResponse({'error': str(e)}, status=400)
-
-        er = EventRequest.objects.create(**payload)
-        return JsonResponse({'request': _serialize_event_request(er)}, status=201)
-
-    return JsonResponse({'error': 'Method not allowed'}, status=405)
-
-
-@csrf_exempt
-def event_request_detail(request, request_id):
-    """
-    GET    /api/event-requests/<id>/  → single request
-    PATCH  /api/event-requests/<id>/  → organizer update (status, organizer_note)
-    DELETE /api/event-requests/<id>/  → remove
-    """
-    try:
-        er = EventRequest.objects.get(pk=request_id)
-    except EventRequest.DoesNotExist:
-        return JsonResponse({'error': 'Not found'}, status=404)
-
-    if request.method == 'GET':
-        return JsonResponse({'request': _serialize_event_request(er)})
-
-    if request.method == 'PATCH':
-        data = _parse_body(request)
-        # Organizer can update status + organizer_note. Client-submitted fields
-        # stay immutable here to preserve the original request as an audit trail.
-        if 'status' in data:
-            valid = {c[0] for c in EventRequest.STATUS_CHOICES}
-            if data['status'] not in valid:
-                return JsonResponse({'error': f'status must be one of {sorted(valid)}'}, status=400)
-            er.status = data['status']
-        if 'organizer_note' in data:
-            er.organizer_note = data['organizer_note']
-        er.save()
-        return JsonResponse({'request': _serialize_event_request(er)})
-
-    if request.method == 'DELETE':
-        er.delete()
-        return JsonResponse({'deleted': request_id})
-
-    return JsonResponse({'error': 'Method not allowed'}, status=405)

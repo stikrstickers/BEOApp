@@ -2,6 +2,9 @@
 Django~=5.2.7
 django-cors-headers~=4.6
 
+# Optional .env loader for development (settings.py uses it if available)
+python-dotenv~=1.0
+
 # PDF text extraction (primary → fallback order in api/views.py)
 PyMuPDF~=1.24
 pdfplumber~=0.11
