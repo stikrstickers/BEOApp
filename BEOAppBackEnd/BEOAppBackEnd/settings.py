@@ -126,4 +126,17 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # CORS — allow the React Native app (Expo Go / dev builds) to reach the API
 CORS_ALLOW_ALL_ORIGINS = True          # tighten this in production
-CORS_ALLOW_METHODS = ['GET', 'POST', 'OPTIONS']
+CORS_ALLOW_METHODS = ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']
+CORS_ALLOW_HEADERS = [
+    'accept', 'accept-encoding', 'authorization', 'content-type',
+    'dnt', 'origin', 'user-agent', 'x-csrftoken', 'x-requested-with',
+]
+
+# OAuth provider configuration — populate when ready to enable social login.
+# Example:
+#   OAUTH_PROVIDERS = {
+#       'google':  {'client_id': '...', 'client_secret': '...', 'redirect_uri': 'http://localhost:8000/api/auth/oauth/google/callback/'},
+#       'outlook': {'client_id': '...', ...},
+#       'github':  {'client_id': '...', ...},
+#   }
+OAUTH_PROVIDERS = {}

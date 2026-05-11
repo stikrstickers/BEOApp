@@ -1,0 +1,14 @@
+# Django + CORS for the React Native client
+Django~=5.2.7
+django-cors-headers~=4.6
+
+# PDF text extraction (primary → fallback order in api/views.py)
+PyMuPDF~=1.24
+pdfplumber~=0.11
+
+# OCR fallback. Requires the Tesseract binary installed on the system:
+#   Windows: https://github.com/UB-Mannheim/tesseract/wiki
+#   macOS:   brew install tesseract
+#   Linux:   apt install tesseract-ocr
+pytesseract~=0.3.13
+Pillow~=11.0

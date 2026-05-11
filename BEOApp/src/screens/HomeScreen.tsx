@@ -142,6 +142,42 @@ export default function HomeScreen({ navigation }: Props) {
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+          <View style={styles.eventEntryRow}>
+            <TouchableOpacity
+              style={[styles.eventEntryCard, styles.eventEntryClient]}
+              onPress={() => navigation.navigate('ClientEventRequest')}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.eventEntryIcon}>📝</Text>
+              <Text style={styles.eventEntryTitle}>Request an Event</Text>
+              <Text style={styles.eventEntrySub}>Client form</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.eventEntryCard, styles.eventEntryOrganizer]}
+              onPress={() => navigation.navigate('OrganizerDashboard')}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.eventEntryIcon}>🗂</Text>
+              <Text style={[styles.eventEntryTitle, { color: '#FFF' }]}>Event Requests</Text>
+              <Text style={[styles.eventEntrySub, { color: 'rgba(255,255,255,0.85)' }]}>Organizer view</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.opsRow}>
+            <TouchableOpacity style={styles.opsTile} onPress={() => navigation.navigate('Inventory')}  activeOpacity={0.85}>
+              <Text style={styles.opsIcon}>📦</Text>
+              <Text style={styles.opsLabel}>Inventory</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.opsTile} onPress={() => navigation.navigate('TeamRoster')} activeOpacity={0.85}>
+              <Text style={styles.opsIcon}>👥</Text>
+              <Text style={styles.opsLabel}>Team</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.opsTile} onPress={() => navigation.navigate('Workflows')}  activeOpacity={0.85}>
+              <Text style={styles.opsIcon}>⚙️</Text>
+              <Text style={styles.opsLabel}>Workflows</Text>
+            </TouchableOpacity>
+          </View>
+
           {threeWeeks.map(({ weekStart, label }, slotIdx) => {
             const stored      = weeks.find((w) => w.week_start === weekStart);
             const isUploading = uploading === weekStart;
@@ -337,5 +373,41 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   binBtnTxt: { color: INDIGO, fontSize: 14, fontWeight: '700' },
+
+  // Event-request entry cards
+  eventEntryRow: { flexDirection: 'row', gap: 10, marginBottom: 14 },
+  eventEntryCard: {
+    flex: 1,
+    borderRadius: 18,
+    padding: 14,
+    minHeight: 96,
+    justifyContent: 'space-between',
+    borderWidth: 1.5,
+  },
+  eventEntryClient: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E5E7EB',
+  },
+  eventEntryOrganizer: {
+    backgroundColor: INDIGO,
+    borderColor: INDIGO,
+  },
+  eventEntryIcon: { fontSize: 24 },
+  eventEntryTitle: { fontSize: 15, fontWeight: '700', color: '#1F2937', marginTop: 6 },
+  eventEntrySub:   { fontSize: 11, color: GRAY, marginTop: 2 },
+
+  // Ops tools row
+  opsRow: { flexDirection: 'row', gap: 8, marginBottom: 14 },
+  opsTile: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  opsIcon: { fontSize: 22, marginBottom: 4 },
+  opsLabel: { fontSize: 12, fontWeight: '700', color: '#374151' },
 });
 
