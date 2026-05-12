@@ -64,7 +64,10 @@ export function FormSheet({
               animate={{ translateY: 0 }}
               exit={{ translateY: 800 }}
               transition={{ type: 'timing', duration: 250 }}
-              style={{ maxHeight: '92%' }}
+              // height: '92%' — fixed percentage so flex children (ScrollView)
+              // have a bounded parent. The outer KAV shrinks `available height`
+              // when the keyboard appears, so 92% naturally compresses with it.
+              style={{ height: '92%' }}
               className="rounded-t-3xl bg-ink-50"
             >
               <View className="flex-1">
