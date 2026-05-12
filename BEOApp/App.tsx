@@ -15,15 +15,14 @@ import { ToastProvider } from '@/components/ui/Toast';
 import LoginScreen from '@/screens/LoginScreen';
 import RegisterScreen from '@/screens/RegisterScreen';
 import ClientEventRequestScreen from '@/screens/ClientEventRequestScreen';
-import OrganizerDashboardScreen from '@/screens/OrganizerDashboardScreen';
-import EventRequestDetailScreen from '@/screens/EventRequestDetailScreen';
 
+import AdminTabs from '@/navigation/AdminTabs';
+
+// Anonymous / client-side stack only — the planner admin lives in AdminTabs.
 export type RootStackParamList = {
-  Login:                undefined;
-  Register:             undefined;
-  ClientEventRequest:   { slug?: string } | undefined;
-  OrganizerDashboard:   undefined;
-  EventRequestDetail:   { id: number };
+  Login:              undefined;
+  Register:           undefined;
+  ClientEventRequest: { slug?: string } | undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -39,26 +38,24 @@ function Router() {
     );
   }
 
-  const isPlanner = user?.role === 'planner';
-  const isAuthed  = !!user;
+  // Planner = full admin (bottom tabs).
+  if (user?.role === 'planner') return <AdminTabs />;
 
+  // Authed client = single-screen flow (submit + history).
+  if (user) {
+    return (
+      <Stack.Navigator screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="ClientEventRequest" component={ClientEventRequestScreen} />
+      </Stack.Navigator>
+    );
+  }
+
+  // Anonymous = login/register/guest-submit.
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
-      {isPlanner ? (
-        <>
-          <Stack.Screen name="OrganizerDashboard" component={OrganizerDashboardScreen} />
-          <Stack.Screen name="EventRequestDetail" component={EventRequestDetailScreen} />
-        </>
-      ) : isAuthed ? (
-        // Authenticated client — drop them straight into the submit flow.
-        <Stack.Screen name="ClientEventRequest" component={ClientEventRequestScreen} />
-      ) : (
-        <>
-          <Stack.Screen name="Login"              component={LoginScreen} />
-          <Stack.Screen name="Register"           component={RegisterScreen} />
-          <Stack.Screen name="ClientEventRequest" component={ClientEventRequestScreen} />
-        </>
-      )}
+      <Stack.Screen name="Login"              component={LoginScreen} />
+      <Stack.Screen name="Register"           component={RegisterScreen} />
+      <Stack.Screen name="ClientEventRequest" component={ClientEventRequestScreen} />
     </Stack.Navigator>
   );
 }

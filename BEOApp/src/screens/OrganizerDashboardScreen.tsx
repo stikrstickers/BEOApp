@@ -22,9 +22,9 @@ import {
   STATUS_LABEL, STATUS_TONE, EVENT_TYPE_LABEL,
   type EventRequest, type EventStatus,
 } from '@/lib/types';
-import type { RootStackParamList } from '../../App';
+import type { EventsStackParamList } from '../navigation/types';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'OrganizerDashboard'>;
+type Props = NativeStackScreenProps<EventsStackParamList, 'EventsHome'>;
 
 const STATUS_FILTERS: Array<{ value: EventStatus | 'all'; label: string }> = [
   { value: 'all',       label: 'All' },

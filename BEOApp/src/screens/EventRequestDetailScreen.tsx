@@ -22,9 +22,9 @@ import {
   STATUS_LABEL, STATUS_TONE, EVENT_TYPE_LABEL, FOOD_SERVICE_LABEL, TECH_NEEDS_LABEL,
   type EventRequest, type EventStatus, type EventAssignment,
 } from '@/lib/types';
-import type { RootStackParamList } from '../../App';
+import type { EventsStackParamList } from '../navigation/types';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'EventRequestDetail'>;
+type Props = NativeStackScreenProps<EventsStackParamList, 'EventRequestDetail'>;
 
 // Allowed onward transitions, matching the backend state machine.
 const NEXT_STATUSES: Record<EventStatus, EventStatus[]> = {
@@ -341,20 +341,26 @@ export default function EventRequestDetailScreen({ navigation, route }: Props) {
                     </Text>
                   </View>
                 ) : (
-                  (asgnQ.data?.assignments ?? []).map((a) => (
-                    <View key={a.id} className="flex-row items-center p-2.5">
-                      <Avatar name={a.team_member.name} size="sm" />
-                      <View className="ml-3 flex-1">
-                        <Text className="text-sm font-semibold text-ink-900">{a.team_member.name}</Text>
-                        <Text className="text-xs text-ink-500">
-                          {a.role_on_event || a.team_member.role}
-                        </Text>
+                  (asgnQ.data?.assignments ?? []).map((a) => {
+                    // Assignment may target a TeamMember OR a vendor Company.
+                    const displayName = a.team_member?.name ?? a.vendor_company?.name ?? '?';
+                    const displayRole = a.role_on_event ||
+                      (a.team_member?.role ?? (a.vendor_company ? 'Vendor' : ''));
+                    return (
+                      <View key={a.id} className="flex-row items-center p-2.5">
+                        <Avatar name={displayName} size="sm" />
+                        <View className="ml-3 flex-1">
+                          <Text className="text-sm font-semibold text-ink-900">{displayName}</Text>
+                          <Text className="text-xs text-ink-500">
+                            {displayRole}{a.vendor_company && a.staff_count > 1 ? ` · ${a.staff_count} staff` : ''}
+                          </Text>
+                        </View>
+                        <Badge bgClassName="bg-ink-100" textClassName="text-ink-700">
+                          {a.status}
+                        </Badge>
                       </View>
-                      <Badge bgClassName="bg-ink-100" textClassName="text-ink-700">
-                        {a.status}
-                      </Badge>
-                    </View>
-                  ))
+                    );
+                  })
                 )}
               </View>
             </Card>
