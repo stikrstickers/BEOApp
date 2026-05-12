@@ -17,8 +17,10 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.shortcuts import render
 from .models import (
-    AuthToken, BEOWeek, BEOWeekFile, EventAssignment, EventRequest,
-    InventoryItem, TeamMember, Workflow, WorkflowAction, WorkflowRun,
+    AuthToken, BEOWeek, BEOWeekFile, Company, Contact, ContactCompanyRole,
+    Event, EventAssignment, EventRequest, Hardware, MessageTemplate,
+    Organization, Perishable, Site, SiteVenue, TeamMember,
+    Workflow, WorkflowAction, WorkflowRun,
 )
 
 
@@ -1703,137 +1705,273 @@ def event_request_detail(request, request_id):
 
 
 # ===========================================================================
-# Inventory + Pricing — org-scoped
+# Inventory — Perishables and Hardware are separate models, parallel endpoints.
+# Shared base coerces the InventoryBase fields; subclass coercers add kind-
+# specific ones.
 # ===========================================================================
 
-_INVENTORY_FIELDS = {
-    'name', 'category', 'unit', 'quantity_on_hand', 'unit_price',
-    'low_stock_threshold', 'notes',
+_INV_BASE_FIELDS = {
+    'name', 'unit', 'quantity_on_hand', 'unit_cost', 'unit_price',
+    'low_stock_threshold', 'notes', 'is_active',
+}
+_PERISHABLE_FIELDS = _INV_BASE_FIELDS | {
+    'category', 'storage', 'supplier', 'lot_number',
+    'expiry_date', 'last_restocked', 'allergens',
+}
+_HARDWARE_FIELDS = _INV_BASE_FIELDS | {
+    'category', 'condition', 'serial_number', 'storage_location',
+    'purchase_date', 'purchase_cost', 'last_serviced', 'service_notes',
 }
 
 
-def _serialize_inventory(item: InventoryItem) -> dict:
+def _decimal(name, value, *, min_value=None):
+    try:
+        d = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError(f'{name} must be a decimal number')
+    if min_value is not None and d < min_value:
+        raise ValueError(f'{name} must be ≥ {min_value}')
+    return d
+
+
+def _date_or_none(name, value):
+    if value in (None, ''):
+        return None
+    try:
+        return _dt.date.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{name} must be YYYY-MM-DD')
+
+
+def _coerce_inv_common(data: dict, allowed: set, partial: bool) -> dict:
+    out = {k: data[k] for k in allowed if k in data}
+    for k in ('quantity_on_hand', 'low_stock_threshold'):
+        if k in out:
+            out[k] = _decimal(k, out[k], min_value=0)
+    for k in ('unit_cost', 'unit_price', 'purchase_cost'):
+        if k in out:
+            out[k] = _decimal(k, out[k], min_value=0)
+    if 'is_active' in out:
+        out['is_active'] = str(out['is_active']).lower() in ('1', 'true', 'yes', 'on') if not isinstance(out['is_active'], bool) else out['is_active']
+    if not partial and not out.get('name'):
+        raise ValueError('name is required')
+    return out
+
+
+def _serialize_inv_base(item) -> dict:
     return {
         'id':                  item.pk,
         'name':                item.name,
-        'category':            item.category,
         'unit':                item.unit,
-        'quantity_on_hand':    item.quantity_on_hand,
+        'quantity_on_hand':    str(item.quantity_on_hand),
+        'unit_cost':           str(item.unit_cost),
         'unit_price':          str(item.unit_price),
-        'low_stock_threshold': item.low_stock_threshold,
+        'low_stock_threshold': str(item.low_stock_threshold),
         'is_low_stock':        item.is_low_stock,
+        'is_active':           item.is_active,
         'notes':               item.notes,
         'updated_at':          item.updated_at.isoformat(),
     }
 
 
-def _coerce_inventory_payload(data: dict, partial: bool = False) -> dict:
-    out = {}
-    for key in _INVENTORY_FIELDS:
-        if key in data:
-            out[key] = data[key]
-    for k in ('quantity_on_hand', 'low_stock_threshold'):
+# ── Perishables ────────────────────────────────────────────────────────────
+
+def _serialize_perishable(item: Perishable) -> dict:
+    return {
+        **_serialize_inv_base(item),
+        'kind':            'perishable',
+        'category':        item.category,
+        'storage':         item.storage,
+        'supplier':        item.supplier,
+        'lot_number':      item.lot_number,
+        'expiry_date':     item.expiry_date.isoformat() if item.expiry_date else None,
+        'last_restocked':  item.last_restocked.isoformat() if item.last_restocked else None,
+        'allergens':       item.allergens or [],
+        'is_expired':      item.is_expired,
+        'days_until_expiry': item.days_until_expiry,
+    }
+
+
+def _coerce_perishable_payload(data: dict, partial: bool = False) -> dict:
+    out = _coerce_inv_common(data, _PERISHABLE_FIELDS, partial)
+    for k in ('expiry_date', 'last_restocked'):
         if k in out:
-            try:
-                out[k] = int(out[k])
-                if out[k] < 0:
-                    raise ValueError
-            except (TypeError, ValueError):
-                raise ValueError(f'{k} must be a non-negative integer')
-    if 'unit_price' in out:
-        try:
-            price = Decimal(str(out['unit_price']))
-            if price < 0:
-                raise ValueError
-            out['unit_price'] = price
-        except (InvalidOperation, TypeError, ValueError):
-            raise ValueError('unit_price must be a non-negative decimal')
-    if not partial:
-        if not out.get('name'):
-            raise ValueError('name is required')
+            out[k] = _date_or_none(k, out[k])
+    if 'allergens' in out and not isinstance(out['allergens'], list):
+        raise ValueError('allergens must be an array')
+    if 'category' in out:
+        valid = {c[0] for c in Perishable.CATEGORY_CHOICES}
+        if out['category'] not in valid:
+            raise ValueError(f"category must be one of {sorted(valid)}")
+    if 'storage' in out:
+        valid = {c[0] for c in Perishable.STORAGE_CHOICES}
+        if out['storage'] not in valid:
+            raise ValueError(f"storage must be one of {sorted(valid)}")
     return out
 
 
 @csrf_exempt
 @planner_required
-def inventory_list(request):
+def perishable_list(request):
     if request.method == 'GET':
-        qs = InventoryItem.objects.filter(organization=request.organization)
+        qs = Perishable.objects.filter(organization=request.organization)
         category = request.GET.get('category')
         if category:
             qs = qs.filter(category=category)
-        return JsonResponse({'items': [_serialize_inventory(i) for i in qs]})
-
+        return JsonResponse({'items': [_serialize_perishable(i) for i in qs]})
     if request.method == 'POST':
         try:
-            payload = _coerce_inventory_payload(_parse_body(request))
+            payload = _coerce_perishable_payload(_parse_body(request))
         except ValueError as e:
             return JsonResponse({'error': str(e)}, status=400)
-        item = InventoryItem.objects.create(organization=request.organization, **payload)
-        return JsonResponse({'item': _serialize_inventory(item)}, status=201)
-
+        item = Perishable.objects.create(organization=request.organization, **payload)
+        return JsonResponse({'item': _serialize_perishable(item)}, status=201)
     return JsonResponse({'error': 'Method not allowed'}, status=405)
 
 
 @csrf_exempt
 @planner_required
-def inventory_detail(request, item_id):
+def perishable_detail(request, item_id):
     try:
-        item = InventoryItem.objects.get(pk=item_id, organization=request.organization)
-    except InventoryItem.DoesNotExist:
+        item = Perishable.objects.get(pk=item_id, organization=request.organization)
+    except Perishable.DoesNotExist:
         return JsonResponse({'error': 'Not found'}, status=404)
-
     if request.method == 'GET':
-        return JsonResponse({'item': _serialize_inventory(item)})
-
+        return JsonResponse({'item': _serialize_perishable(item)})
     if request.method == 'PATCH':
         try:
-            payload = _coerce_inventory_payload(_parse_body(request), partial=True)
+            payload = _coerce_perishable_payload(_parse_body(request), partial=True)
         except ValueError as e:
             return JsonResponse({'error': str(e)}, status=400)
         for k, v in payload.items():
             setattr(item, k, v)
         item.save()
-        return JsonResponse({'item': _serialize_inventory(item)})
-
+        return JsonResponse({'item': _serialize_perishable(item)})
     if request.method == 'DELETE':
         item.delete()
         return JsonResponse({'deleted': item_id})
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
 
+
+# ── Hardware ───────────────────────────────────────────────────────────────
+
+def _serialize_hardware(item: Hardware) -> dict:
+    return {
+        **_serialize_inv_base(item),
+        'kind':              'hardware',
+        'category':          item.category,
+        'condition':         item.condition,
+        'serial_number':     item.serial_number,
+        'storage_location':  item.storage_location,
+        'purchase_date':     item.purchase_date.isoformat() if item.purchase_date else None,
+        'purchase_cost':     str(item.purchase_cost),
+        'last_serviced':     item.last_serviced.isoformat() if item.last_serviced else None,
+        'service_notes':     item.service_notes,
+    }
+
+
+def _coerce_hardware_payload(data: dict, partial: bool = False) -> dict:
+    out = _coerce_inv_common(data, _HARDWARE_FIELDS, partial)
+    for k in ('purchase_date', 'last_serviced'):
+        if k in out:
+            out[k] = _date_or_none(k, out[k])
+    if 'category' in out:
+        valid = {c[0] for c in Hardware.CATEGORY_CHOICES}
+        if out['category'] not in valid:
+            raise ValueError(f"category must be one of {sorted(valid)}")
+    if 'condition' in out:
+        valid = {c[0] for c in Hardware.CONDITION_CHOICES}
+        if out['condition'] not in valid:
+            raise ValueError(f"condition must be one of {sorted(valid)}")
+    return out
+
+
+@csrf_exempt
+@planner_required
+def hardware_list(request):
+    if request.method == 'GET':
+        qs = Hardware.objects.filter(organization=request.organization)
+        category = request.GET.get('category')
+        if category:
+            qs = qs.filter(category=category)
+        return JsonResponse({'items': [_serialize_hardware(i) for i in qs]})
+    if request.method == 'POST':
+        try:
+            payload = _coerce_hardware_payload(_parse_body(request))
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        item = Hardware.objects.create(organization=request.organization, **payload)
+        return JsonResponse({'item': _serialize_hardware(item)}, status=201)
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+@planner_required
+def hardware_detail(request, item_id):
+    try:
+        item = Hardware.objects.get(pk=item_id, organization=request.organization)
+    except Hardware.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+    if request.method == 'GET':
+        return JsonResponse({'item': _serialize_hardware(item)})
+    if request.method == 'PATCH':
+        try:
+            payload = _coerce_hardware_payload(_parse_body(request), partial=True)
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        for k, v in payload.items():
+            setattr(item, k, v)
+        item.save()
+        return JsonResponse({'item': _serialize_hardware(item)})
+    if request.method == 'DELETE':
+        item.delete()
+        return JsonResponse({'deleted': item_id})
     return JsonResponse({'error': 'Method not allowed'}, status=405)
 
 
 # ===========================================================================
-# Team Builder — roster + assignments
+# Teammates — in-house roster (staff + temps). Vendors live in Companies.
 # ===========================================================================
 
-_TEAM_FIELDS = {'name', 'email', 'phone', 'role', 'is_vendor', 'company', 'notes'}
+_TEAM_FIELDS = {
+    'name', 'email', 'phone', 'role', 'employment_type',
+    'hourly_rate', 'certifications', 'notes', 'is_active',
+}
 
 
 def _serialize_team_member(m: TeamMember) -> dict:
     return {
-        'id':        m.pk,
-        'name':      m.name,
-        'email':     m.email,
-        'phone':     m.phone,
-        'role':      m.role,
-        'is_vendor': m.is_vendor,
-        'company':   m.company,
-        'notes':     m.notes,
+        'id':              m.pk,
+        'name':            m.name,
+        'email':           m.email,
+        'phone':           m.phone,
+        'role':            m.role,
+        'employment_type': m.employment_type,
+        'hourly_rate':     str(m.hourly_rate),
+        'certifications':  m.certifications or [],
+        'is_active':       m.is_active,
+        'notes':           m.notes,
     }
 
 
 def _coerce_team_payload(data: dict, partial: bool = False) -> dict:
-    out = {}
-    for key in _TEAM_FIELDS:
-        if key in data:
-            out[key] = data[key]
-    if 'is_vendor' in out:
-        v = out['is_vendor']
-        out['is_vendor'] = str(v).lower() in ('1', 'true', 'yes', 'on') if not isinstance(v, bool) else v
-    if not partial:
-        if not out.get('name'):
-            raise ValueError('name is required')
+    out = {k: data[k] for k in _TEAM_FIELDS if k in data}
+    if 'role' in out:
+        valid = {c[0] for c in TeamMember.ROLE_CHOICES}
+        if out['role'] not in valid:
+            raise ValueError(f"role must be one of {sorted(valid)}")
+    if 'employment_type' in out:
+        valid = {c[0] for c in TeamMember.EMPLOYMENT_CHOICES}
+        if out['employment_type'] not in valid:
+            raise ValueError(f"employment_type must be one of {sorted(valid)}")
+    if 'hourly_rate' in out:
+        out['hourly_rate'] = _decimal('hourly_rate', out['hourly_rate'], min_value=0)
+    if 'certifications' in out and not isinstance(out['certifications'], list):
+        raise ValueError('certifications must be an array of strings')
+    if 'is_active' in out and not isinstance(out['is_active'], bool):
+        out['is_active'] = str(out['is_active']).lower() in ('1', 'true', 'yes', 'on')
+    if not partial and not out.get('name'):
+        raise ValueError('name is required')
     return out
 
 
@@ -1845,6 +1983,9 @@ def team_list(request):
         role = request.GET.get('role')
         if role:
             qs = qs.filter(role=role)
+        emp = request.GET.get('employment_type')
+        if emp in ('staff', 'temp'):
+            qs = qs.filter(employment_type=emp)
         return JsonResponse({'members': [_serialize_team_member(m) for m in qs]})
     if request.method == 'POST':
         try:
@@ -1882,47 +2023,78 @@ def team_detail(request, member_id):
 
 def _serialize_assignment(a: EventAssignment) -> dict:
     return {
-        'id':            a.pk,
-        'event_request': a.event_request_id,
-        'team_member':   _serialize_team_member(a.team_member),
-        'role_on_event': a.role_on_event,
-        'status':        a.status,
-        'notes':         a.notes,
-        'assigned_at':   a.assigned_at.isoformat(),
+        'id':              a.pk,
+        'event_request':   a.event_request_id,
+        'team_member':     _serialize_team_member(a.team_member) if a.team_member_id else None,
+        'vendor_company':  {
+            'id':   a.vendor_company.pk,
+            'name': a.vendor_company.name,
+        } if a.vendor_company_id else None,
+        'staff_count':     a.staff_count,
+        'role_on_event':   a.role_on_event,
+        'status':          a.status,
+        'notes':           a.notes,
+        'assigned_at':     a.assigned_at.isoformat(),
     }
 
 
 @csrf_exempt
 @planner_required
 def event_assignments(request, request_id):
+    """GET = list. POST body shape:
+       { "team_member": <id> }          # in-house assignment
+       { "vendor_company": <id>, "staff_count": N }  # vendor assignment
+    """
     try:
         er = EventRequest.objects.get(pk=request_id, organization=request.organization)
     except EventRequest.DoesNotExist:
         return JsonResponse({'error': 'Event request not found'}, status=404)
 
     if request.method == 'GET':
-        qs = er.assignments.select_related('team_member').all()
+        qs = er.assignments.select_related('team_member', 'vendor_company').all()
         return JsonResponse({'assignments': [_serialize_assignment(a) for a in qs]})
 
     if request.method == 'POST':
         data = _parse_body(request)
-        tm_id = data.get('team_member')
-        if not tm_id:
-            return JsonResponse({'error': 'team_member id required'}, status=400)
+        tm_id     = data.get('team_member')
+        vendor_id = data.get('vendor_company')
+        if not tm_id and not vendor_id:
+            return JsonResponse({'error': 'Provide team_member OR vendor_company id'}, status=400)
+        if tm_id and vendor_id:
+            return JsonResponse({'error': 'Provide team_member OR vendor_company, not both'}, status=400)
+
+        tm = None
+        vendor = None
+        if tm_id:
+            try:
+                tm = TeamMember.objects.get(pk=int(tm_id), organization=request.organization)
+            except (TeamMember.DoesNotExist, ValueError, TypeError):
+                return JsonResponse({'error': 'team_member not found'}, status=404)
+        else:
+            try:
+                vendor = Company.objects.get(
+                    pk=int(vendor_id), organization=request.organization, kind__in=['vendor', 'both'],
+                )
+            except (Company.DoesNotExist, ValueError, TypeError):
+                return JsonResponse({'error': 'vendor_company not found or not a vendor'}, status=404)
+
         try:
-            tm = TeamMember.objects.get(pk=int(tm_id), organization=request.organization)
-        except (TeamMember.DoesNotExist, ValueError, TypeError):
-            return JsonResponse({'error': 'team_member not found'}, status=404)
+            staff_count = max(1, int(data.get('staff_count') or 1))
+        except (TypeError, ValueError):
+            return JsonResponse({'error': 'staff_count must be a positive integer'}, status=400)
+
         role_on_event = (data.get('role_on_event') or '').strip()
         try:
             a = EventAssignment.objects.create(
                 event_request=er,
                 team_member=tm,
+                vendor_company=vendor,
+                staff_count=staff_count,
                 role_on_event=role_on_event,
                 notes=(data.get('notes') or '').strip(),
             )
         except IntegrityError:
-            return JsonResponse({'error': 'This team member is already assigned in that role'}, status=409)
+            return JsonResponse({'error': 'Already assigned (duplicate)'}, status=409)
         return JsonResponse({'assignment': _serialize_assignment(a)}, status=201)
 
     return JsonResponse({'error': 'Method not allowed'}, status=405)
@@ -2151,6 +2323,803 @@ def event_workflow_runs(request, request_id):
         [:50]
     )
     return JsonResponse({'runs': [_serialize_workflow_run(r) for r in runs]})
+
+
+# ===========================================================================
+# Sites + SiteVenues — physical locations + their bookable rooms
+# ===========================================================================
+
+_SITE_FIELDS = {
+    'name', 'address_line1', 'address_line2', 'city', 'state_region',
+    'postal_code', 'country', 'owner_name', 'operator_name',
+    'contact_name', 'contact_email', 'contact_phone', 'website', 'notes',
+}
+
+
+def _serialize_site(s: Site, *, with_venues: bool = False) -> dict:
+    out = {
+        'id':              s.pk,
+        'name':            s.name,
+        'address_line1':   s.address_line1,
+        'address_line2':   s.address_line2,
+        'city':            s.city,
+        'state_region':    s.state_region,
+        'postal_code':     s.postal_code,
+        'country':         s.country,
+        'owner_name':      s.owner_name,
+        'operator_name':   s.operator_name,
+        'contact_name':    s.contact_name,
+        'contact_email':   s.contact_email,
+        'contact_phone':   s.contact_phone,
+        'website':         s.website,
+        'notes':           s.notes,
+        'updated_at':      s.updated_at.isoformat(),
+    }
+    if with_venues:
+        out['venues'] = [_serialize_site_venue(v) for v in s.venues.all().order_by('name')]
+    return out
+
+
+def _coerce_site_payload(data: dict, partial: bool = False) -> dict:
+    out = {k: data[k] for k in _SITE_FIELDS if k in data}
+    if not partial and not out.get('name'):
+        raise ValueError('name is required')
+    return out
+
+
+@csrf_exempt
+@planner_required
+def site_list(request):
+    if request.method == 'GET':
+        qs = Site.objects.filter(organization=request.organization).prefetch_related('venues')
+        with_venues = request.GET.get('with_venues') == '1'
+        return JsonResponse({'sites': [_serialize_site(s, with_venues=with_venues) for s in qs]})
+    if request.method == 'POST':
+        try:
+            payload = _coerce_site_payload(_parse_body(request))
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        s = Site.objects.create(organization=request.organization, **payload)
+        return JsonResponse({'site': _serialize_site(s)}, status=201)
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+@planner_required
+def site_detail(request, site_id):
+    try:
+        s = Site.objects.get(pk=site_id, organization=request.organization)
+    except Site.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+    if request.method == 'GET':
+        return JsonResponse({'site': _serialize_site(s, with_venues=True)})
+    if request.method == 'PATCH':
+        try:
+            payload = _coerce_site_payload(_parse_body(request), partial=True)
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        for k, v in payload.items():
+            setattr(s, k, v)
+        s.save()
+        return JsonResponse({'site': _serialize_site(s)})
+    if request.method == 'DELETE':
+        s.delete()
+        return JsonResponse({'deleted': site_id})
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+_VENUE_FIELDS = {
+    'name', 'capacity_min', 'capacity_max', 'square_footage',
+    'supported_layouts', 'has_av', 'has_stage', 'has_dance_floor',
+    'has_kitchen_access', 'has_outdoor_access', 'is_accessible',
+    'has_natural_light', 'photo_urls', 'base_hourly_rate', 'notes', 'is_active',
+}
+_VENUE_LAYOUT_VALUES = {c[0] for c in SiteVenue.LAYOUT_CHOICES}
+
+
+def _serialize_site_venue(v: SiteVenue) -> dict:
+    return {
+        'id':                 v.pk,
+        'site':               v.site_id,
+        'site_name':          v.site.name if v.site_id else '',
+        'name':               v.name,
+        'capacity_min':       v.capacity_min,
+        'capacity_max':       v.capacity_max,
+        'square_footage':     v.square_footage,
+        'supported_layouts':  v.supported_layouts or [],
+        'has_av':             v.has_av,
+        'has_stage':          v.has_stage,
+        'has_dance_floor':    v.has_dance_floor,
+        'has_kitchen_access': v.has_kitchen_access,
+        'has_outdoor_access': v.has_outdoor_access,
+        'is_accessible':      v.is_accessible,
+        'has_natural_light':  v.has_natural_light,
+        'photo_urls':         v.photo_urls or [],
+        'base_hourly_rate':   str(v.base_hourly_rate),
+        'notes':              v.notes,
+        'is_active':          v.is_active,
+        'updated_at':         v.updated_at.isoformat(),
+    }
+
+
+def _coerce_venue_payload(data: dict, partial: bool = False) -> dict:
+    out = {k: data[k] for k in _VENUE_FIELDS if k in data}
+    for k in ('capacity_min', 'capacity_max', 'square_footage'):
+        if k in out:
+            try:
+                out[k] = max(0, int(out[k]))
+            except (TypeError, ValueError):
+                raise ValueError(f'{k} must be a non-negative integer')
+    if 'base_hourly_rate' in out:
+        out['base_hourly_rate'] = _decimal('base_hourly_rate', out['base_hourly_rate'], min_value=0)
+    for k in ('has_av', 'has_stage', 'has_dance_floor', 'has_kitchen_access',
+              'has_outdoor_access', 'is_accessible', 'has_natural_light', 'is_active'):
+        if k in out and not isinstance(out[k], bool):
+            out[k] = str(out[k]).lower() in ('1', 'true', 'yes', 'on')
+    if 'supported_layouts' in out:
+        if not isinstance(out['supported_layouts'], list):
+            raise ValueError('supported_layouts must be an array')
+        bad = [v for v in out['supported_layouts'] if v not in _VENUE_LAYOUT_VALUES]
+        if bad:
+            raise ValueError(f'unknown layout(s): {bad}')
+    if 'photo_urls' in out and not isinstance(out['photo_urls'], list):
+        raise ValueError('photo_urls must be an array of URLs')
+    if 'capacity_min' in out and 'capacity_max' in out:
+        if out['capacity_min'] > out['capacity_max'] > 0:
+            raise ValueError('capacity_min must be ≤ capacity_max')
+    if not partial and not out.get('name'):
+        raise ValueError('name is required')
+    return out
+
+
+@csrf_exempt
+@planner_required
+def site_venues(request, site_id):
+    """GET/POST venues for a specific site."""
+    try:
+        site = Site.objects.get(pk=site_id, organization=request.organization)
+    except Site.DoesNotExist:
+        return JsonResponse({'error': 'Site not found'}, status=404)
+    if request.method == 'GET':
+        qs = site.venues.all().order_by('name')
+        return JsonResponse({'venues': [_serialize_site_venue(v) for v in qs]})
+    if request.method == 'POST':
+        try:
+            payload = _coerce_venue_payload(_parse_body(request))
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        v = SiteVenue.objects.create(site=site, **payload)
+        return JsonResponse({'venue': _serialize_site_venue(v)}, status=201)
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+@planner_required
+def site_venue_detail(request, venue_id):
+    try:
+        v = (
+            SiteVenue.objects
+            .select_related('site')
+            .get(pk=venue_id, site__organization=request.organization)
+        )
+    except SiteVenue.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+    if request.method == 'GET':
+        return JsonResponse({'venue': _serialize_site_venue(v)})
+    if request.method == 'PATCH':
+        try:
+            payload = _coerce_venue_payload(_parse_body(request), partial=True)
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        for k, val in payload.items():
+            setattr(v, k, val)
+        v.save()
+        return JsonResponse({'venue': _serialize_site_venue(v)})
+    if request.method == 'DELETE':
+        v.delete()
+        return JsonResponse({'deleted': venue_id})
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@require_http_methods(['GET'])
+@planner_required
+def venue_list_all(request):
+    """Flat list of all venues across all sites in the org. Useful for pickers."""
+    qs = (
+        SiteVenue.objects
+        .filter(site__organization=request.organization)
+        .select_related('site')
+        .order_by('site__name', 'name')
+    )
+    active_only = request.GET.get('active_only', '1') == '1'
+    if active_only:
+        qs = qs.filter(is_active=True)
+    return JsonResponse({'venues': [_serialize_site_venue(v) for v in qs]})
+
+
+# ===========================================================================
+# Companies (client orgs + vendors) + Contacts (individuals)
+# ===========================================================================
+
+_COMPANY_FIELDS = {
+    'name', 'kind', 'industry', 'website', 'address',
+    'billing_email', 'phone', 'services', 'notes',
+}
+
+
+def _serialize_company(c: Company, *, with_contacts: bool = False) -> dict:
+    out = {
+        'id':            c.pk,
+        'name':          c.name,
+        'kind':          c.kind,
+        'industry':      c.industry,
+        'website':       c.website,
+        'address':       c.address,
+        'billing_email': c.billing_email,
+        'phone':         c.phone,
+        'services':      c.services or [],
+        'notes':         c.notes,
+        'is_vendor':     c.is_vendor,
+        'is_client':     c.is_client,
+        'updated_at':    c.updated_at.isoformat(),
+    }
+    if with_contacts:
+        out['contacts'] = [
+            {
+                'id':          ccr.contact.pk,
+                'full_name':   ccr.contact.full_name,
+                'email':       ccr.contact.email,
+                'role_title':  ccr.role_title,
+                'is_primary':  ccr.is_primary,
+            }
+            for ccr in ContactCompanyRole.objects.filter(company=c).select_related('contact')
+        ]
+    return out
+
+
+def _coerce_company_payload(data: dict, partial: bool = False) -> dict:
+    out = {k: data[k] for k in _COMPANY_FIELDS if k in data}
+    if 'kind' in out:
+        valid = {c[0] for c in Company.KIND_CHOICES}
+        if out['kind'] not in valid:
+            raise ValueError(f"kind must be one of {sorted(valid)}")
+    if 'services' in out and not isinstance(out['services'], list):
+        raise ValueError('services must be an array of strings')
+    if not partial and not out.get('name'):
+        raise ValueError('name is required')
+    return out
+
+
+@csrf_exempt
+@planner_required
+def company_list(request):
+    if request.method == 'GET':
+        qs = Company.objects.filter(organization=request.organization)
+        kind = request.GET.get('kind')  # client | vendor | both
+        if kind in ('client', 'vendor', 'both'):
+            if kind == 'client':
+                qs = qs.filter(kind__in=['client', 'both'])
+            elif kind == 'vendor':
+                qs = qs.filter(kind__in=['vendor', 'both'])
+            else:
+                qs = qs.filter(kind='both')
+        return JsonResponse({'companies': [_serialize_company(c) for c in qs]})
+    if request.method == 'POST':
+        try:
+            payload = _coerce_company_payload(_parse_body(request))
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        c = Company.objects.create(organization=request.organization, **payload)
+        return JsonResponse({'company': _serialize_company(c)}, status=201)
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+@planner_required
+def company_detail(request, company_id):
+    try:
+        c = Company.objects.get(pk=company_id, organization=request.organization)
+    except Company.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+    if request.method == 'GET':
+        return JsonResponse({'company': _serialize_company(c, with_contacts=True)})
+    if request.method == 'PATCH':
+        try:
+            payload = _coerce_company_payload(_parse_body(request), partial=True)
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        for k, v in payload.items():
+            setattr(c, k, v)
+        c.save()
+        return JsonResponse({'company': _serialize_company(c)})
+    if request.method == 'DELETE':
+        c.delete()
+        return JsonResponse({'deleted': company_id})
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+_CONTACT_FIELDS = {
+    'first_name', 'last_name', 'email', 'phone', 'title', 'tags', 'notes',
+}
+
+
+def _serialize_contact(c: Contact, *, with_companies: bool = False) -> dict:
+    out = {
+        'id':          c.pk,
+        'first_name':  c.first_name,
+        'last_name':   c.last_name,
+        'full_name':   c.full_name,
+        'email':       c.email,
+        'phone':       c.phone,
+        'title':       c.title,
+        'tags':        c.tags or [],
+        'notes':       c.notes,
+        'updated_at':  c.updated_at.isoformat(),
+    }
+    if with_companies:
+        out['companies'] = [
+            {
+                'company_id':   ccr.company.pk,
+                'company_name': ccr.company.name,
+                'company_kind': ccr.company.kind,
+                'role_title':   ccr.role_title,
+                'is_primary':   ccr.is_primary,
+            }
+            for ccr in ContactCompanyRole.objects.filter(contact=c).select_related('company')
+        ]
+    return out
+
+
+def _coerce_contact_payload(data: dict, partial: bool = False) -> dict:
+    out = {k: data[k] for k in _CONTACT_FIELDS if k in data}
+    if 'tags' in out and not isinstance(out['tags'], list):
+        raise ValueError('tags must be an array of strings')
+    if not partial and not out.get('first_name'):
+        raise ValueError('first_name is required')
+    return out
+
+
+@csrf_exempt
+@planner_required
+def contact_list(request):
+    if request.method == 'GET':
+        qs = Contact.objects.filter(organization=request.organization)
+        q = request.GET.get('q')
+        if q:
+            from django.db.models import Q
+            qs = qs.filter(
+                Q(first_name__icontains=q)
+                | Q(last_name__icontains=q)
+                | Q(email__icontains=q)
+            )
+        return JsonResponse({'contacts': [_serialize_contact(c) for c in qs]})
+    if request.method == 'POST':
+        data = _parse_body(request)
+        try:
+            payload = _coerce_contact_payload(data)
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        c = Contact.objects.create(organization=request.organization, **payload)
+
+        # Optional initial company links: { "companies": [ { id, role_title?, is_primary? }, ... ] }
+        companies = data.get('companies') or []
+        if isinstance(companies, list):
+            for link in companies:
+                try:
+                    company = Company.objects.get(
+                        pk=int(link.get('id')), organization=request.organization,
+                    )
+                except (Company.DoesNotExist, ValueError, TypeError):
+                    continue
+                ContactCompanyRole.objects.get_or_create(
+                    contact=c, company=company,
+                    defaults={
+                        'role_title': (link.get('role_title') or '')[:120],
+                        'is_primary': bool(link.get('is_primary')),
+                    },
+                )
+        return JsonResponse({'contact': _serialize_contact(c, with_companies=True)}, status=201)
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+@planner_required
+def contact_detail(request, contact_id):
+    try:
+        c = Contact.objects.get(pk=contact_id, organization=request.organization)
+    except Contact.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+    if request.method == 'GET':
+        return JsonResponse({'contact': _serialize_contact(c, with_companies=True)})
+    if request.method == 'PATCH':
+        try:
+            payload = _coerce_contact_payload(_parse_body(request), partial=True)
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        for k, v in payload.items():
+            setattr(c, k, v)
+        c.save()
+        return JsonResponse({'contact': _serialize_contact(c, with_companies=True)})
+    if request.method == 'DELETE':
+        c.delete()
+        return JsonResponse({'deleted': contact_id})
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+@planner_required
+def contact_companies(request, contact_id):
+    """POST attach a Company to a Contact; DELETE detach by company_id query param."""
+    try:
+        c = Contact.objects.get(pk=contact_id, organization=request.organization)
+    except Contact.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+    if request.method == 'POST':
+        data = _parse_body(request)
+        try:
+            company = Company.objects.get(
+                pk=int(data.get('company_id') or 0),
+                organization=request.organization,
+            )
+        except (Company.DoesNotExist, ValueError, TypeError):
+            return JsonResponse({'error': 'company not found'}, status=404)
+        link, _ = ContactCompanyRole.objects.update_or_create(
+            contact=c, company=company,
+            defaults={
+                'role_title': (data.get('role_title') or '')[:120],
+                'is_primary': bool(data.get('is_primary')),
+            },
+        )
+        return JsonResponse({'link': {
+            'contact_id': c.pk, 'company_id': company.pk,
+            'role_title': link.role_title, 'is_primary': link.is_primary,
+        }}, status=201)
+    if request.method == 'DELETE':
+        company_id = request.GET.get('company_id')
+        try:
+            cid = int(company_id or 0)
+        except (TypeError, ValueError):
+            return JsonResponse({'error': 'company_id query param required'}, status=400)
+        ContactCompanyRole.objects.filter(contact=c, company_id=cid).delete()
+        return JsonResponse({'detached': cid})
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+# ===========================================================================
+# Events — the calendar view (auto-spawned from EventRequest on confirm,
+# or planner-created directly).
+# ===========================================================================
+
+_EVENT_FIELDS = {
+    'name', 'event_type', 'starts_at', 'ends_at', 'headcount', 'status',
+    'food_service', 'tech_needs', 'rsvp_required', 'description', 'color',
+}
+
+
+def _parse_iso_datetime(value, field_name='datetime'):
+    if value in (None, ''):
+        return None
+    try:
+        # Accept "2026-08-15T14:00:00Z" or "...+00:00"
+        if isinstance(value, str) and value.endswith('Z'):
+            value = value[:-1] + '+00:00'
+        return _dt.datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise ValueError(f'{field_name} must be an ISO datetime')
+
+
+def _serialize_event(e: Event) -> dict:
+    return {
+        'id':             e.pk,
+        'source_request': e.source_request_id,
+        'name':           e.name,
+        'event_type':     e.event_type,
+        'starts_at':      e.starts_at.isoformat(),
+        'ends_at':        e.ends_at.isoformat(),
+        'headcount':      e.headcount,
+        'status':         e.status,
+        'food_service':   e.food_service,
+        'tech_needs':     e.tech_needs,
+        'rsvp_required':  e.rsvp_required,
+        'description':    e.description,
+        'color':          e.color,
+        'contact':        {
+            'id':        e.contact.pk,
+            'full_name': e.contact.full_name,
+            'email':     e.contact.email,
+        } if e.contact_id else None,
+        'site_venue':     {
+            'id':        e.site_venue.pk,
+            'name':      e.site_venue.name,
+            'site_name': e.site_venue.site.name if e.site_venue.site_id else '',
+        } if e.site_venue_id else None,
+        'updated_at':     e.updated_at.isoformat(),
+    }
+
+
+def _coerce_event_payload(data: dict, partial: bool = False) -> dict:
+    out = {k: data[k] for k in _EVENT_FIELDS if k in data}
+    if 'starts_at' in out:
+        out['starts_at'] = _parse_iso_datetime(out['starts_at'], 'starts_at')
+    if 'ends_at' in out:
+        out['ends_at']   = _parse_iso_datetime(out['ends_at'], 'ends_at')
+    if 'starts_at' in out and 'ends_at' in out and out['starts_at'] and out['ends_at']:
+        if out['ends_at'] <= out['starts_at']:
+            raise ValueError('ends_at must be after starts_at')
+    if 'headcount' in out:
+        try:
+            out['headcount'] = max(0, int(out['headcount']))
+        except (TypeError, ValueError):
+            raise ValueError('headcount must be a non-negative integer')
+    if 'status' in out:
+        valid = {c[0] for c in Event.STATUS_CHOICES}
+        if out['status'] not in valid:
+            raise ValueError(f"status must be one of {sorted(valid)}")
+    if not partial and not out.get('name'):
+        raise ValueError('name is required')
+    return out
+
+
+@csrf_exempt
+@planner_required
+def event_list(request):
+    """List events with optional date-window filtering.
+
+    Query params:
+      start=YYYY-MM-DD  (inclusive)
+      end=YYYY-MM-DD    (inclusive)
+      status=scheduled|in_progress|completed|cancelled
+      site_venue=<id>
+    """
+    if request.method == 'GET':
+        qs = (
+            Event.objects
+            .filter(organization=request.organization)
+            .select_related('contact', 'site_venue', 'site_venue__site')
+        )
+        start = request.GET.get('start')
+        end   = request.GET.get('end')
+        if start:
+            try:
+                qs = qs.filter(starts_at__date__gte=_dt.date.fromisoformat(start))
+            except ValueError:
+                return JsonResponse({'error': 'start must be YYYY-MM-DD'}, status=400)
+        if end:
+            try:
+                qs = qs.filter(starts_at__date__lte=_dt.date.fromisoformat(end))
+            except ValueError:
+                return JsonResponse({'error': 'end must be YYYY-MM-DD'}, status=400)
+        status_f = request.GET.get('status')
+        if status_f:
+            qs = qs.filter(status=status_f)
+        venue_f = request.GET.get('site_venue')
+        if venue_f:
+            qs = qs.filter(site_venue_id=venue_f)
+        return JsonResponse({'events': [_serialize_event(e) for e in qs]})
+
+    if request.method == 'POST':
+        data = _parse_body(request)
+        try:
+            payload = _coerce_event_payload(data)
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        # Optional FKs
+        contact = None
+        if data.get('contact_id'):
+            try:
+                contact = Contact.objects.get(
+                    pk=int(data['contact_id']), organization=request.organization,
+                )
+            except (Contact.DoesNotExist, ValueError, TypeError):
+                return JsonResponse({'error': 'contact not found'}, status=404)
+        site_venue = None
+        if data.get('site_venue_id'):
+            try:
+                site_venue = SiteVenue.objects.get(
+                    pk=int(data['site_venue_id']),
+                    site__organization=request.organization,
+                )
+            except (SiteVenue.DoesNotExist, ValueError, TypeError):
+                return JsonResponse({'error': 'site_venue not found'}, status=404)
+        e = Event.objects.create(
+            organization=request.organization,
+            contact=contact, site_venue=site_venue,
+            **payload,
+        )
+        return JsonResponse({'event': _serialize_event(e)}, status=201)
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+@planner_required
+def event_detail(request, event_id):
+    try:
+        e = (
+            Event.objects
+            .select_related('contact', 'site_venue', 'site_venue__site')
+            .get(pk=event_id, organization=request.organization)
+        )
+    except Event.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+
+    if request.method == 'GET':
+        return JsonResponse({'event': _serialize_event(e)})
+    if request.method == 'PATCH':
+        data = _parse_body(request)
+        try:
+            payload = _coerce_event_payload(data, partial=True)
+        except ValueError as ex:
+            return JsonResponse({'error': str(ex)}, status=400)
+        for k, v in payload.items():
+            setattr(e, k, v)
+        if 'contact_id' in data:
+            if data['contact_id'] in (None, '', 0):
+                e.contact = None
+            else:
+                try:
+                    e.contact = Contact.objects.get(
+                        pk=int(data['contact_id']), organization=request.organization,
+                    )
+                except (Contact.DoesNotExist, ValueError, TypeError):
+                    return JsonResponse({'error': 'contact not found'}, status=404)
+        if 'site_venue_id' in data:
+            if data['site_venue_id'] in (None, '', 0):
+                e.site_venue = None
+            else:
+                try:
+                    e.site_venue = SiteVenue.objects.get(
+                        pk=int(data['site_venue_id']),
+                        site__organization=request.organization,
+                    )
+                except (SiteVenue.DoesNotExist, ValueError, TypeError):
+                    return JsonResponse({'error': 'site_venue not found'}, status=404)
+        e.save()
+        return JsonResponse({'event': _serialize_event(e)})
+    if request.method == 'DELETE':
+        e.delete()
+        return JsonResponse({'deleted': event_id})
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+# ===========================================================================
+# Message Templates — BEOs, guest/vendor notifications, contracts, etc.
+# ===========================================================================
+
+_TEMPLATE_FIELDS = {
+    'name', 'kind', 'channel', 'subject', 'body', 'is_active', 'is_default',
+}
+
+
+def _serialize_template(t: MessageTemplate) -> dict:
+    return {
+        'id':         t.pk,
+        'name':       t.name,
+        'kind':       t.kind,
+        'channel':    t.channel,
+        'subject':    t.subject,
+        'body':       t.body,
+        'is_active':  t.is_active,
+        'is_default': t.is_default,
+        'updated_at': t.updated_at.isoformat(),
+    }
+
+
+def _coerce_template_payload(data: dict, partial: bool = False) -> dict:
+    out = {k: data[k] for k in _TEMPLATE_FIELDS if k in data}
+    if 'kind' in out:
+        valid = {c[0] for c in MessageTemplate.KIND_CHOICES}
+        if out['kind'] not in valid:
+            raise ValueError(f"kind must be one of {sorted(valid)}")
+    if 'channel' in out:
+        valid = {c[0] for c in MessageTemplate.CHANNEL_CHOICES}
+        if out['channel'] not in valid:
+            raise ValueError(f"channel must be one of {sorted(valid)}")
+    for k in ('is_active', 'is_default'):
+        if k in out and not isinstance(out[k], bool):
+            out[k] = str(out[k]).lower() in ('1', 'true', 'yes', 'on')
+    if not partial and not out.get('name'):
+        raise ValueError('name is required')
+    return out
+
+
+@csrf_exempt
+@planner_required
+def template_list(request):
+    if request.method == 'GET':
+        qs = MessageTemplate.objects.filter(organization=request.organization)
+        kind = request.GET.get('kind')
+        if kind:
+            qs = qs.filter(kind=kind)
+        channel = request.GET.get('channel')
+        if channel:
+            qs = qs.filter(channel=channel)
+        return JsonResponse({'templates': [_serialize_template(t) for t in qs]})
+    if request.method == 'POST':
+        try:
+            payload = _coerce_template_payload(_parse_body(request))
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        # If is_default=true, demote other defaults for the same (kind, channel).
+        if payload.get('is_default'):
+            MessageTemplate.objects.filter(
+                organization=request.organization,
+                kind=payload.get('kind', 'guest_email'),
+                channel=payload.get('channel', 'email'),
+                is_default=True,
+            ).update(is_default=False)
+        t = MessageTemplate.objects.create(organization=request.organization, **payload)
+        return JsonResponse({'template': _serialize_template(t)}, status=201)
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+@planner_required
+def template_detail(request, template_id):
+    try:
+        t = MessageTemplate.objects.get(pk=template_id, organization=request.organization)
+    except MessageTemplate.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+    if request.method == 'GET':
+        return JsonResponse({'template': _serialize_template(t)})
+    if request.method == 'PATCH':
+        try:
+            payload = _coerce_template_payload(_parse_body(request), partial=True)
+        except ValueError as e:
+            return JsonResponse({'error': str(e)}, status=400)
+        # Single-default invariant per (kind, channel).
+        if payload.get('is_default'):
+            MessageTemplate.objects.filter(
+                organization=request.organization,
+                kind=payload.get('kind', t.kind),
+                channel=payload.get('channel', t.channel),
+                is_default=True,
+            ).exclude(pk=t.pk).update(is_default=False)
+        for k, v in payload.items():
+            setattr(t, k, v)
+        t.save()
+        return JsonResponse({'template': _serialize_template(t)})
+    if request.method == 'DELETE':
+        t.delete()
+        return JsonResponse({'deleted': template_id})
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+@require_http_methods(['POST'])
+@planner_required
+def template_preview(request, template_id):
+    """Render a template with a supplied context. Body: { "context": {...} }.
+
+    The context can be any nested dict; tokens like {{event.name}} and
+    {{contact.first_name}} are resolved against it. Used by the editor's
+    Preview panel.
+    """
+    try:
+        t = MessageTemplate.objects.get(pk=template_id, organization=request.organization)
+    except MessageTemplate.DoesNotExist:
+        return JsonResponse({'error': 'Not found'}, status=404)
+    data = _parse_body(request)
+    ctx = data.get('context') if isinstance(data.get('context'), dict) else {}
+    from .templating import render_template
+    return JsonResponse({
+        'subject': render_template(t.subject, ctx),
+        'body':    render_template(t.body, ctx),
+        'tokens':  list_template_tokens(t.subject + '\n' + t.body),
+    })
+
+
+@require_http_methods(['GET'])
+@planner_required
+def template_tokens(request):
+    """Return the catalog of available {{tokens}} for the editor's autocomplete."""
+    from .templating import AVAILABLE_TOKENS
+    return JsonResponse({'tokens': AVAILABLE_TOKENS})
+
+
+def list_template_tokens(text: str) -> list:
+    """Find {{tokens}} actually used in a string. Helper for preview UI."""
+    import re
+    return sorted(set(re.findall(r'\{\{\s*([\w.]+)\s*\}\}', text or '')))
 
 
 def _extract_with_pdfplumber(pdf_bytes: bytes) -> list:
