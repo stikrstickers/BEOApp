@@ -45,7 +45,18 @@ export function FormSheet({
       animationType="none"
       statusBarTranslucent
     >
-      <View className="flex-1 bg-ink-900/40">
+      {/*
+        The KeyboardAvoidingView wraps the whole modal so it can shrink the
+        backdrop layout when the keyboard rises. Inside, we `justify-end` to
+        glue the sheet to the bottom — and the sheet uses maxHeight rather
+        than a fixed height so it can naturally compress as the keyboard
+        eats vertical space. Without this, h-[90%] would stay 90% of the
+        whole screen and the keyboard would draw over the footer.
+      */}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        className="flex-1 justify-end bg-ink-900/40"
+      >
         <AnimatePresence>
           {open ? (
             <MotiView
@@ -53,17 +64,10 @@ export function FormSheet({
               animate={{ translateY: 0 }}
               exit={{ translateY: 800 }}
               transition={{ type: 'timing', duration: 250 }}
-              className="mt-auto h-[90%] rounded-t-3xl bg-ink-50"
+              style={{ maxHeight: '92%' }}
+              className="rounded-t-3xl bg-ink-50"
             >
-              <KeyboardAvoidingView
-                // 'padding' on both platforms is the most reliable inside a Modal
-                // — Android's default windowSoftInputMode doesn't propagate to the
-                // modal's own window, so we have to do the math ourselves.
-                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-                // Compensate for the modal's top inset so the keyboard math lines up.
-                keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
-                className="flex-1"
-              >
+              <View className="flex-1">
                 {/* Drag handle */}
                 <View className="items-center pt-2 pb-1">
                   <View className="h-1 w-10 rounded-full bg-ink-300" />
@@ -88,38 +92,41 @@ export function FormSheet({
                   </Pressable>
                 </View>
 
-                {/* Scrollable body — extra bottom padding so the last field has
-                    room to be scrolled above the keyboard via scrollToFocus. */}
+                {/* Scrollable body. pb-4 is enough — the keyboard pushes the
+                    whole sheet up via KAV, so we don't need to oversize this. */}
                 <ScrollView
                   keyboardShouldPersistTaps="handled"
                   keyboardDismissMode="interactive"
-                  automaticallyAdjustKeyboardInsets
-                  contentContainerClassName="px-5 pb-24"
+                  contentContainerClassName="px-5 pb-6"
                   className="flex-1"
                 >
                   <View className="gap-y-4">{children}</View>
                 </ScrollView>
 
-                {/* Footer */}
-                <View className="flex-row items-center gap-x-2 border-t border-ink-200 bg-white px-5 py-3">
+                {/*
+                  Footer: spacer pushes the right group to the edge regardless
+                  of whether `destructive` renders, so Cancel/Save always sit
+                  flush right (ml-auto was inconsistent across phones).
+                */}
+                <View className="flex-row items-center border-t border-ink-200 bg-white px-4 py-3">
                   {destructive ? (
                     <Button
                       variant="ghost"
-                      size="md"
+                      size="sm"
                       onPress={destructive.onPress}
-                      className="px-2"
                     >
                       <Text className="text-sm font-semibold text-danger-600">
                         {destructive.label}
                       </Text>
                     </Button>
                   ) : null}
-                  <View className="ml-auto flex-row gap-x-2">
-                    <Button variant="secondary" size="md" onPress={onClose}>
+                  <View className="flex-1" />
+                  <View className="flex-row gap-x-2">
+                    <Button variant="secondary" size="sm" onPress={onClose}>
                       Cancel
                     </Button>
                     <Button
-                      size="md"
+                      size="sm"
                       onPress={onSubmit}
                       loading={submitting}
                       disabled={submitDisabled}
@@ -128,11 +135,11 @@ export function FormSheet({
                     </Button>
                   </View>
                 </View>
-              </KeyboardAvoidingView>
+              </View>
             </MotiView>
           ) : null}
         </AnimatePresence>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
