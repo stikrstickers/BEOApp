@@ -107,36 +107,35 @@ export function FormSheet({
                 </ScrollView>
 
                 {/*
-                  Footer: spacer pushes the right group to the edge regardless
-                  of whether `destructive` renders, so Cancel/Save always sit
-                  flush right (ml-auto was inconsistent across phones).
+                  Footer. `justify-end` packs the buttons against the right
+                  edge; `mr-auto` on the destructive Button (when present)
+                  pushes it back to the left. Avoids the flex-1 spacer +
+                  inner View nesting that was overflowing on narrow phones.
                 */}
-                <View className="flex-row items-center border-t border-ink-200 bg-white px-4 py-3">
+                <View className="flex-row items-center justify-end gap-x-2 border-t border-ink-200 bg-white px-4 py-3">
                   {destructive ? (
                     <Button
                       variant="ghost"
                       size="sm"
                       onPress={destructive.onPress}
+                      className="mr-auto"
                     >
                       <Text className="text-sm font-semibold text-danger-600">
                         {destructive.label}
                       </Text>
                     </Button>
                   ) : null}
-                  <View className="flex-1" />
-                  <View className="flex-row gap-x-2">
-                    <Button variant="secondary" size="sm" onPress={onClose}>
-                      Cancel
-                    </Button>
-                    <Button
-                      size="sm"
-                      onPress={onSubmit}
-                      loading={submitting}
-                      disabled={submitDisabled}
-                    >
-                      {submitLabel}
-                    </Button>
-                  </View>
+                  <Button variant="secondary" size="sm" onPress={onClose}>
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    onPress={onSubmit}
+                    loading={submitting}
+                    disabled={submitDisabled}
+                  >
+                    {submitLabel}
+                  </Button>
                 </View>
               </View>
             </MotiView>

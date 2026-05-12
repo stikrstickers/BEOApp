@@ -85,7 +85,12 @@ export function Button({
           animate={{ scale: pressed && !isDisabled ? 0.97 : 1 }}
           transition={{ type: 'timing', duration: 120 }}
           className={cn(
-            'w-full flex-row items-center justify-center rounded-2xl',
+            'flex-row items-center justify-center rounded-2xl',
+            // Only stretch when the consumer asked for it. Without this,
+            // `w-full` on the inner view fights with the Pressable's
+            // content-sized width and Yoga can resolve them to whatever's
+            // available — which on narrow footers blew Cancel past the edge.
+            fullWidth ? 'w-full' : 'self-start',
             s.wrap,
             v.wrap,
             pressed && !isDisabled && v.pressed,
