@@ -176,7 +176,8 @@ export default function TemplateEditorScreen({ navigation, route }: Props) {
   return (
     <Screen contentClassName="px-0 py-0">
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
         className="flex-1"
       >
         {/* Header */}

@@ -41,7 +41,10 @@ export default function LoginScreen({ navigation }: Props) {
 
   return (
     <Screen scroll>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
+      >
         <MotiView
           from={{ opacity: 0, translateY: -12 }}
           animate={{ opacity: 1, translateY: 0 }}

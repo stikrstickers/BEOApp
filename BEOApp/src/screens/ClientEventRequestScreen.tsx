@@ -337,7 +337,10 @@ export default function ClientEventRequestScreen({ navigation, route }: Props) {
 
   return (
     <Screen scroll>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
+      >
         <View className={cn(
           'mb-2 flex-row items-center',
           user ? 'justify-end' : 'justify-start',

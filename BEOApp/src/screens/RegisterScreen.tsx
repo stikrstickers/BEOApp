@@ -109,7 +109,10 @@ export default function RegisterScreen({ navigation }: Props) {
 
   return (
     <Screen scroll>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
+      >
         <View className="mb-2 flex-row items-center">
           <Pressable
             onPress={() => navigation.goBack()}

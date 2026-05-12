@@ -56,7 +56,12 @@ export function FormSheet({
               className="mt-auto h-[90%] rounded-t-3xl bg-ink-50"
             >
               <KeyboardAvoidingView
-                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+                // 'padding' on both platforms is the most reliable inside a Modal
+                // — Android's default windowSoftInputMode doesn't propagate to the
+                // modal's own window, so we have to do the math ourselves.
+                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                // Compensate for the modal's top inset so the keyboard math lines up.
+                keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 24}
                 className="flex-1"
               >
                 {/* Drag handle */}
@@ -83,10 +88,13 @@ export function FormSheet({
                   </Pressable>
                 </View>
 
-                {/* Scrollable body */}
+                {/* Scrollable body — extra bottom padding so the last field has
+                    room to be scrolled above the keyboard via scrollToFocus. */}
                 <ScrollView
                   keyboardShouldPersistTaps="handled"
-                  contentContainerClassName="px-5 pb-4"
+                  keyboardDismissMode="interactive"
+                  automaticallyAdjustKeyboardInsets
+                  contentContainerClassName="px-5 pb-24"
                   className="flex-1"
                 >
                   <View className="gap-y-4">{children}</View>
