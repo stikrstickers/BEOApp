@@ -17,6 +17,8 @@ import { Badge } from '@/components/ui/Badge';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { FAB } from '@/components/ui/FAB';
 import { useToast } from '@/components/ui/Toast';
+import { CompanyForm } from '@/components/forms/CompanyForm';
+import { ContactForm } from '@/components/forms/ContactForm';
 import { api, ApiError } from '@/lib/api';
 import { useQueryClient, useMutation } from '@tanstack/react-query';
 import type { Company, Contact } from '@/lib/types';
@@ -28,6 +30,8 @@ type Segment = 'companies' | 'individuals' | 'vendors';
 export default function ContactsScreen({ navigation }: Props) {
   const [seg, setSeg] = useState<Segment>('companies');
   const [search, setSearch] = useState('');
+  const [companyFormOpen, setCompanyFormOpen] = useState(false);
+  const [contactFormOpen, setContactFormOpen] = useState(false);
   const qc = useQueryClient();
   const toast = useToast();
 
@@ -86,7 +90,10 @@ export default function ContactsScreen({ navigation }: Props) {
     onError: (e) => toast.error('Could not delete', e.message),
   });
 
-  const onAdd = () => toast.info('Add coming soon', 'Wire up the create modal');
+  const onAdd = () => {
+    if (seg === 'individuals') setContactFormOpen(true);
+    else setCompanyFormOpen(true);
+  };
 
   const refresh = () => {
     if (seg === 'individuals') contactsQ.refetch();
@@ -202,6 +209,15 @@ export default function ContactsScreen({ navigation }: Props) {
         }
       />
       <FAB onPress={onAdd} label={`New ${seg === 'individuals' ? 'contact' : seg === 'vendors' ? 'vendor' : 'company'}`} />
+      <CompanyForm
+        open={companyFormOpen}
+        onClose={() => setCompanyFormOpen(false)}
+        presetKind={seg === 'vendors' ? 'vendor' : 'client'}
+      />
+      <ContactForm
+        open={contactFormOpen}
+        onClose={() => setContactFormOpen(false)}
+      />
     </Screen>
   );
 }

@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/Badge';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { FAB } from '@/components/ui/FAB';
 import { useToast } from '@/components/ui/Toast';
+import { SiteForm } from '@/components/forms/SiteForm';
 import { api, ApiError } from '@/lib/api';
 import type { Site } from '@/lib/types';
 import type { MoreStackParamList } from '../../navigation/types';
@@ -19,6 +20,7 @@ type Props = NativeStackScreenProps<MoreStackParamList, 'SitesHome'>;
 
 export default function SitesScreen({ navigation }: Props) {
   const [search, setSearch] = useState('');
+  const [formOpen, setFormOpen] = useState(false);
   const qc = useQueryClient();
   const toast = useToast();
 
@@ -135,10 +137,8 @@ export default function SitesScreen({ navigation }: Props) {
           />
         }
       />
-      <FAB
-        onPress={() => toast.info('Add coming soon', 'Wire up the create modal')}
-        label="New site"
-      />
+      <FAB onPress={() => setFormOpen(true)} label="New site" />
+      <SiteForm open={formOpen} onClose={() => setFormOpen(false)} />
     </Screen>
   );
 }

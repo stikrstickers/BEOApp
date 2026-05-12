@@ -5,6 +5,7 @@ import DateTimePicker, { DateTimePickerEvent } from '@react-native-community/dat
 import {
   ArrowLeft, ArrowRight, Calendar, Clock, Users, MapPin,
   UtensilsCrossed, Cpu, FileText, Building2, Mail, Phone, User as UserIcon, Check,
+  LogOut, PartyPopper,
 } from 'lucide-react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -167,7 +168,7 @@ function timeOnly(d: Date | null): string | undefined {
 }
 
 export default function ClientEventRequestScreen({ navigation, route }: Props) {
-  const { user } = useAuth();
+  const { user, signOut } = useAuth();
   const toast = useToast();
   const [slug, setSlug] = useState(route.params?.slug ?? '');
   const [form, setForm] = useState<FormState>(() => ({
@@ -176,6 +177,7 @@ export default function ClientEventRequestScreen({ navigation, route }: Props) {
     client_email: user?.email ?? '',
   }));
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [submitted, setSubmitted] = useState<{ orgName: string } | null>(null);
 
   // Resolve the planner org by slug — gives us the name/brand to display.
   const orgQ = useQuery<{ organization: Organization }>({
@@ -203,7 +205,7 @@ export default function ClientEventRequestScreen({ navigation, route }: Props) {
     ),
     onSuccess: () => {
       toast.success('Request sent', `${org?.name ?? 'The planner'} will be in touch shortly`);
-      navigation.goBack();
+      setSubmitted({ orgName: org?.name ?? 'The planner' });
     },
     onError: (err) => {
       if (err.fields?.length) {
@@ -247,17 +249,100 @@ export default function ClientEventRequestScreen({ navigation, route }: Props) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
+  // Success state — we just submitted. Show it inline instead of trying to
+  // navigate "back" (the authed-client stack has no parent).
+  if (submitted) {
+    return (
+      <Screen scroll>
+        <MotiView
+          from={{ opacity: 0, scale: 0.92, translateY: 12 }}
+          animate={{ opacity: 1, scale: 1, translateY: 0 }}
+          transition={{ type: 'spring', damping: 14 }}
+          className="mt-16 items-center"
+        >
+          <View className="mb-6 h-20 w-20 items-center justify-center rounded-3xl bg-success-500">
+            <PartyPopper size={36} color="#fff" />
+          </View>
+          <Text className="text-center text-3xl font-bold text-ink-900">You're all set</Text>
+          <Text className="mt-2 max-w-xs text-center text-base text-ink-500">
+            {submitted.orgName} got your request. They'll reach out at{' '}
+            <Text className="font-semibold text-ink-700">{form.client_email}</Text>.
+          </Text>
+        </MotiView>
+
+        <View className="mt-10 gap-y-3">
+          <Button
+            fullWidth size="lg"
+            onPress={() => {
+              setSubmitted(null);
+              setForm({
+                ...initialForm,
+                client_name:  user?.name ?? '',
+                client_email: user?.email ?? '',
+              });
+            }}
+          >
+            Submit another request
+          </Button>
+          {user ? (
+            <Button
+              fullWidth variant="ghost" size="md"
+              icon={<LogOut size={16} color="#475569" />}
+              onPress={signOut}
+            >
+              Sign out
+            </Button>
+          ) : navigation.canGoBack() ? (
+            <Button
+              fullWidth variant="ghost" size="md"
+              onPress={() => navigation.goBack()}
+            >
+              Back to sign in
+            </Button>
+          ) : null}
+        </View>
+      </Screen>
+    );
+  }
+
+  // The header row varies by who's looking at this screen:
+  //   • authed client → "Sign out" (their stack root has no parent)
+  //   • anonymous w/ canGoBack → "Back" arrow (pushed from Login)
+  //   • anonymous w/o parent → nothing
+  const renderHeaderAction = () => {
+    if (user) {
+      return (
+        <Pressable
+          onPress={signOut}
+          hitSlop={12} className="-mr-2 p-2"
+          accessibilityRole="button" accessibilityLabel="Sign out"
+        >
+          <LogOut size={20} color="#334155" />
+        </Pressable>
+      );
+    }
+    if (navigation.canGoBack()) {
+      return (
+        <Pressable
+          onPress={() => navigation.goBack()}
+          hitSlop={12} className="-ml-2 mr-2 p-2"
+          accessibilityRole="button" accessibilityLabel="Go back"
+        >
+          <ArrowLeft size={22} color="#334155" />
+        </Pressable>
+      );
+    }
+    return null;
+  };
+
   return (
     <Screen scroll>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View className="mb-2 flex-row items-center">
-          <Pressable
-            onPress={() => navigation.goBack()}
-            hitSlop={12} className="-ml-2 mr-2 p-2"
-            accessibilityRole="button" accessibilityLabel="Go back"
-          >
-            <ArrowLeft size={22} color="#334155" />
-          </Pressable>
+        <View className={cn(
+          'mb-2 flex-row items-center',
+          user ? 'justify-end' : 'justify-start',
+        )}>
+          {renderHeaderAction()}
         </View>
 
         <MotiView

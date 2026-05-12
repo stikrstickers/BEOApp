@@ -13,6 +13,7 @@ import { Badge } from '@/components/ui/Badge';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { FAB } from '@/components/ui/FAB';
 import { useToast } from '@/components/ui/Toast';
+import { TeammateForm } from '@/components/forms/TeammateForm';
 import { api, ApiError } from '@/lib/api';
 import type { EmploymentType, TeamMember } from '@/lib/types';
 import type { MoreStackParamList } from '../../navigation/types';
@@ -29,6 +30,8 @@ const ROLE_LABEL: Record<string, string> = {
 export default function TeammatesScreen({ navigation }: Props) {
   const [seg, setSeg] = useState<Segment>('all');
   const [search, setSearch] = useState('');
+  const [formOpen, setFormOpen] = useState(false);
+  const [editing, setEditing] = useState<TeamMember | null>(null);
   const qc = useQueryClient();
   const toast = useToast();
 
@@ -112,7 +115,7 @@ export default function TeammatesScreen({ navigation }: Props) {
             <DataRow
               selectable={helpers.selectionMode}
               selected={helpers.selected}
-              onPress={() => helpers.selectionMode ? helpers.toggleSelected() : toast.info('Edit coming soon')}
+              onPress={() => helpers.selectionMode ? helpers.toggleSelected() : (setEditing(m), setFormOpen(true))}
               onLongPress={() => { helpers.enterSelection(); helpers.toggleSelected(); }}
               leading={<Avatar name={m.name} size="md" />}
               title={m.name}
@@ -151,8 +154,13 @@ export default function TeammatesScreen({ navigation }: Props) {
         }
       />
       <FAB
-        onPress={() => toast.info('Add coming soon', 'Wire up the create modal')}
+        onPress={() => { setEditing(null); setFormOpen(true); }}
         label="New teammate"
+      />
+      <TeammateForm
+        open={formOpen}
+        onClose={() => { setFormOpen(false); setEditing(null); }}
+        initial={editing}
       />
     </Screen>
   );

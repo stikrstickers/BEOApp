@@ -115,6 +115,25 @@ export default function LoginScreen({ navigation }: Props) {
             Create an account
           </Text>
         </View>
+
+        {/* Divider + guest path */}
+        <View className="mt-6 flex-row items-center px-4">
+          <View className="h-px flex-1 bg-ink-200" />
+          <Text className="mx-3 text-xs uppercase tracking-wider text-ink-400">or</Text>
+          <View className="h-px flex-1 bg-ink-200" />
+        </View>
+
+        <View className="mt-6">
+          <Button
+            variant="outline"
+            size="lg"
+            fullWidth
+            onPress={() => navigation.navigate('ClientEventRequest')}
+            accessibilityLabel="Submit an event request as a guest"
+          >
+            Submit a request as a guest
+          </Button>
+        </View>
       </KeyboardAvoidingView>
     </Screen>
   );

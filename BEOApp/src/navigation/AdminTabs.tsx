@@ -16,10 +16,11 @@ import SitesScreen from '@/screens/admin/SitesScreen';
 import SiteDetailScreen from '@/screens/admin/SiteDetailScreen';
 import TeammatesScreen from '@/screens/admin/TeammatesScreen';
 import TemplatesScreen from '@/screens/admin/TemplatesScreen';
-import {
-  ContactDetailScreen, CompanyDetailScreen, EventDetailScreen,
-  TemplateEditorScreen, WorkspaceScreen,
-} from '@/screens/admin/stubs';
+import TemplateEditorScreen from '@/screens/admin/TemplateEditorScreen';
+import ContactDetailScreen from '@/screens/admin/ContactDetailScreen';
+import CompanyDetailScreen from '@/screens/admin/CompanyDetailScreen';
+import EventDetailScreen from '@/screens/admin/EventDetailScreen';
+import WorkspaceScreen from '@/screens/admin/WorkspaceScreen';
 
 import OrganizerDashboardScreen from '@/screens/OrganizerDashboardScreen';
 import EventRequestDetailScreen from '@/screens/EventRequestDetailScreen';

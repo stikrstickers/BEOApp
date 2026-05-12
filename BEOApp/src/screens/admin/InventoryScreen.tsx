@@ -11,6 +11,8 @@ import { Badge } from '@/components/ui/Badge';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { FAB } from '@/components/ui/FAB';
 import { useToast } from '@/components/ui/Toast';
+import { PerishableForm } from '@/components/forms/PerishableForm';
+import { HardwareForm } from '@/components/forms/HardwareForm';
 import { api, ApiError } from '@/lib/api';
 import {
   type Hardware, type Perishable,
@@ -23,6 +25,10 @@ type Segment = 'perishables' | 'hardware';
 export default function InventoryScreen() {
   const [seg, setSeg] = useState<Segment>('perishables');
   const [search, setSearch] = useState('');
+  const [perishableFormOpen, setPerishableFormOpen] = useState(false);
+  const [hardwareFormOpen, setHardwareFormOpen]   = useState(false);
+  const [perishableEdit, setPerishableEdit] = useState<Perishable | null>(null);
+  const [hardwareEdit, setHardwareEdit]     = useState<Hardware | null>(null);
   const qc = useQueryClient();
   const toast = useToast();
 
@@ -96,7 +102,7 @@ export default function InventoryScreen() {
         <DataRow
           selectable={helpers.selectionMode}
           selected={helpers.selected}
-          onPress={() => helpers.selectionMode ? helpers.toggleSelected() : toast.info('Edit coming soon')}
+          onPress={() => helpers.selectionMode ? helpers.toggleSelected() : (setPerishableEdit(p), setPerishableFormOpen(true))}
           onLongPress={() => { helpers.enterSelection(); helpers.toggleSelected(); }}
           leading={
             <View className="h-10 w-10 items-center justify-center rounded-2xl bg-success-500/10">
@@ -144,7 +150,7 @@ export default function InventoryScreen() {
         <DataRow
           selectable={helpers.selectionMode}
           selected={helpers.selected}
-          onPress={() => helpers.selectionMode ? helpers.toggleSelected() : toast.info('Edit coming soon')}
+          onPress={() => helpers.selectionMode ? helpers.toggleSelected() : (setHardwareEdit(h), setHardwareFormOpen(true))}
           onLongPress={() => { helpers.enterSelection(); helpers.toggleSelected(); }}
           leading={
             <View className="h-10 w-10 items-center justify-center rounded-2xl bg-brand-50">
@@ -208,8 +214,22 @@ export default function InventoryScreen() {
         }
       />
       <FAB
-        onPress={() => toast.info('Add coming soon', 'Wire up the create modal')}
+        onPress={() =>
+          isPerishables
+            ? (setPerishableEdit(null), setPerishableFormOpen(true))
+            : (setHardwareEdit(null),   setHardwareFormOpen(true))
+        }
         label={`New ${isPerishables ? 'perishable' : 'item'}`}
+      />
+      <PerishableForm
+        open={perishableFormOpen}
+        onClose={() => { setPerishableFormOpen(false); setPerishableEdit(null); }}
+        initial={perishableEdit}
+      />
+      <HardwareForm
+        open={hardwareFormOpen}
+        onClose={() => { setHardwareFormOpen(false); setHardwareEdit(null); }}
+        initial={hardwareEdit}
       />
     </Screen>
   );

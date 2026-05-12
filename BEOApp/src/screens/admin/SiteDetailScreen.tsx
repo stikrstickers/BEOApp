@@ -1,9 +1,9 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Linking, Pressable, RefreshControl, ScrollView, Text, View } from 'react-native';
 import { MotiView } from 'moti';
 import {
   ArrowLeft, Building, MapPin, User as UserIcon, Mail, Phone, Globe,
-  DoorOpen, Plus, Users as UsersIcon, Square,
+  DoorOpen, Plus, Users as UsersIcon, Square, Pencil,
 } from 'lucide-react-native';
 import { useQuery } from '@tanstack/react-query';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -15,6 +15,8 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { useToast } from '@/components/ui/Toast';
+import { SiteForm } from '@/components/forms/SiteForm';
+import { SiteVenueForm } from '@/components/forms/SiteVenueForm';
 import { api } from '@/lib/api';
 import type { Site, SiteVenue } from '@/lib/types';
 import { VENUE_LAYOUT_LABEL } from '@/lib/types';
@@ -45,7 +47,7 @@ function ContactRow({ icon, label, value, onPress }: {
   );
 }
 
-function VenueCard({ v }: { v: SiteVenue }) {
+function VenueCard({ v, onEdit }: { v: SiteVenue; onEdit: () => void }) {
   const amenities: Array<[boolean, string]> = [
     [v.has_av,             'A/V'],
     [v.has_stage,          'Stage'],
@@ -58,7 +60,7 @@ function VenueCard({ v }: { v: SiteVenue }) {
   const activeAmenities = amenities.filter(([on]) => on).map(([, label]) => label);
 
   return (
-    <Card className="mb-3">
+    <Card className="mb-3" onPress={onEdit} accessibilityLabel={`Edit ${v.name}`}>
       <View className="p-4">
         <View className="flex-row items-start justify-between">
           <View className="flex-1 pr-3">
@@ -115,6 +117,9 @@ function VenueCard({ v }: { v: SiteVenue }) {
 export default function SiteDetailScreen({ navigation, route }: Props) {
   const { id } = route.params;
   const toast = useToast();
+  const [siteFormOpen, setSiteFormOpen] = useState(false);
+  const [venueFormOpen, setVenueFormOpen] = useState(false);
+  const [venueBeingEdited, setVenueBeingEdited] = useState<SiteVenue | null>(null);
 
   const q = useQuery<{ site: Site }>({
     queryKey: ['site', id],
@@ -135,7 +140,7 @@ export default function SiteDetailScreen({ navigation, route }: Props) {
         refreshControl={<RefreshControl refreshing={q.isRefetching} onRefresh={() => q.refetch()} tintColor="#6366F1" />}
         contentContainerStyle={{ paddingBottom: 32 }}
       >
-        <View className="flex-row items-center px-5 pt-4">
+        <View className="flex-row items-center justify-between px-5 pt-4">
           <Pressable
             onPress={() => navigation.goBack()}
             hitSlop={12} className="-ml-2 p-2"
@@ -143,6 +148,16 @@ export default function SiteDetailScreen({ navigation, route }: Props) {
           >
             <ArrowLeft size={22} color="#334155" />
           </Pressable>
+          {s ? (
+            <Button
+              size="sm"
+              variant="outline"
+              icon={<Pencil size={14} color="#334155" />}
+              onPress={() => setSiteFormOpen(true)}
+            >
+              Edit
+            </Button>
+          ) : null}
         </View>
 
         {q.isLoading || !s ? (
@@ -232,7 +247,7 @@ export default function SiteDetailScreen({ navigation, route }: Props) {
                 size="sm"
                 variant="outline"
                 icon={<Plus size={14} color="#334155" />}
-                onPress={() => toast.info('Add venue coming soon')}
+                onPress={() => { setVenueBeingEdited(null); setVenueFormOpen(true); }}
               >
                 Add
               </Button>
@@ -245,12 +260,34 @@ export default function SiteDetailScreen({ navigation, route }: Props) {
                   description="Add ballrooms, terraces, or any space clients can book"
                 />
               ) : (
-                venues.map((v) => <VenueCard key={v.id} v={v} />)
+                venues.map((v) => (
+                  <VenueCard
+                    key={v.id}
+                    v={v}
+                    onEdit={() => { setVenueBeingEdited(v); setVenueFormOpen(true); }}
+                  />
+                ))
               )}
             </View>
           </MotiView>
         )}
       </ScrollView>
+
+      {s ? (
+        <>
+          <SiteForm
+            open={siteFormOpen}
+            onClose={() => setSiteFormOpen(false)}
+            initial={s}
+          />
+          <SiteVenueForm
+            open={venueFormOpen}
+            onClose={() => { setVenueFormOpen(false); setVenueBeingEdited(null); }}
+            siteId={s.id}
+            initial={venueBeingEdited}
+          />
+        </>
+      ) : null}
     </Screen>
   );
 }
