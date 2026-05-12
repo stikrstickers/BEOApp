@@ -6,7 +6,8 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "postinstall": "node ./scripts/dedupe-react.js"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -47,8 +48,11 @@
     "typescript": "~5.9.2"
   },
   "overrides": {
-    "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "react":     "$react",
+    "react-dom": "$react-dom",
+    "moti": {
+      "react": "$react"
+    }
   },
   "private": true
 }
