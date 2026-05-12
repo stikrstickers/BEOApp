@@ -1,11 +1,35 @@
-import React, { useEffect } from 'react';
+import React, {
+  createContext, useCallback, useContext, useEffect, useRef, useState,
+} from 'react';
 import {
-  KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, Text, View,
+  Dimensions, Keyboard, KeyboardAvoidingView, Modal, NativeScrollEvent,
+  NativeSyntheticEvent, Platform, Pressable, ScrollView, Text,
+  TextInput, View,
 } from 'react-native';
 import { MotiView, AnimatePresence } from 'moti';
 import { X } from 'lucide-react-native';
 import { cn } from '@/lib/cn';
 import { Button } from './Button';
+
+
+// ---------------------------------------------------------------------------
+// FormScrollContext — Android's ScrollView doesn't auto-scroll focused
+// TextInputs above the keyboard. We do it ourselves: the FormSheet exposes
+// a callback to its children; the Input component (or any consumer) calls
+// it on focus, passing the focused node. FormSheet measures the node's
+// screen position and scrolls so it sits above the keyboard.
+// ---------------------------------------------------------------------------
+
+interface FormScrollCtx {
+  /** Tell the host scroll view that this input just got focus. */
+  registerFocus: (node: TextInput | null) => void;
+}
+
+export const FormScrollContext = createContext<FormScrollCtx | null>(null);
+
+export function useFormScroll() {
+  return useContext(FormScrollContext);
+}
 
 interface FormSheetProps {
   open: boolean;
@@ -37,6 +61,71 @@ export function FormSheet({
   submitLabel = 'Save', onSubmit, submitting, submitDisabled,
   destructive,
 }: FormSheetProps) {
+  const scrollRef = useRef<ScrollView>(null);
+  const scrollOffset = useRef(0);
+  const [kbHeight, setKbHeight] = useState(0);
+
+  // Track current scroll position so registerFocus can compute the absolute
+  // target Y from the relative measurement.
+  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    scrollOffset.current = e.nativeEvent.contentOffset.y;
+  }, []);
+
+  // Listen for keyboard show/hide so we know how much screen the keyboard
+  // occupies. Only attach the listeners while the sheet is open.
+  useEffect(() => {
+    if (!open) {
+      setKbHeight(0);
+      return;
+    }
+    const showEvt = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvt = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const show = Keyboard.addListener(showEvt, (e) => setKbHeight(e.endCoordinates.height));
+    const hide = Keyboard.addListener(hideEvt, () => setKbHeight(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, [open]);
+
+  // When the active keyboard height changes, re-scroll for the focused input.
+  // We remember the last focused node so newly-shown keyboards re-scroll.
+  const focusedNode = useRef<TextInput | null>(null);
+
+  const scrollFocusedIntoView = useCallback(() => {
+    const node = focusedNode.current;
+    const sv = scrollRef.current;
+    if (!node || !sv) return;
+    // Delay so the keyboard's geometry is final.
+    setTimeout(() => {
+      try {
+        (node as any).measureInWindow?.((_x: number, y: number, _w: number, h: number) => {
+          const screenH = Dimensions.get('window').height;
+          // Leave some breathing room above the keyboard so the input doesn't
+          // sit flush against the keyboard's top edge.
+          const safeBottom = screenH - kbHeight - 40;
+          if (y + h > safeBottom) {
+            const delta = y + h - safeBottom;
+            sv.scrollTo({ y: scrollOffset.current + delta, animated: true });
+          }
+        });
+      } catch {
+        /* noop — measure can fail if the node unmounted */
+      }
+    }, 120);
+  }, [kbHeight]);
+
+  useEffect(() => {
+    if (kbHeight > 0) scrollFocusedIntoView();
+  }, [kbHeight, scrollFocusedIntoView]);
+
+  const ctx: FormScrollCtx = {
+    registerFocus: (node) => {
+      focusedNode.current = node;
+      if (kbHeight > 0) scrollFocusedIntoView();
+    },
+  };
+
   return (
     <Modal
       visible={open}
@@ -95,16 +184,25 @@ export function FormSheet({
                   </Pressable>
                 </View>
 
-                {/* Scrollable body. pb-4 is enough — the keyboard pushes the
-                    whole sheet up via KAV, so we don't need to oversize this. */}
-                <ScrollView
-                  keyboardShouldPersistTaps="handled"
-                  keyboardDismissMode="interactive"
-                  contentContainerClassName="px-5 pb-6"
-                  className="flex-1"
-                >
-                  <View className="gap-y-4">{children}</View>
-                </ScrollView>
+                {/*
+                  Scrollable body. Tracks scroll position so registerFocus
+                  can scroll the focused TextInput above the keyboard. The
+                  large bottom padding gives manual-scroll room past the last
+                  field even after the auto-scroll lands.
+                */}
+                <FormScrollContext.Provider value={ctx}>
+                  <ScrollView
+                    ref={scrollRef}
+                    onScroll={onScroll}
+                    scrollEventThrottle={16}
+                    keyboardShouldPersistTaps="handled"
+                    keyboardDismissMode="interactive"
+                    contentContainerClassName="px-5 pb-32"
+                    className="flex-1"
+                  >
+                    <View className="gap-y-4">{children}</View>
+                  </ScrollView>
+                </FormScrollContext.Provider>
 
                 {/*
                   Footer. `justify-end` packs the buttons against the right

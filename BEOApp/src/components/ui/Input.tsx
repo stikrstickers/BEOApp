@@ -1,7 +1,8 @@
-import React, { forwardRef, useState } from 'react';
+import React, { forwardRef, useImperativeHandle, useRef, useState } from 'react';
 import { TextInput, TextInputProps, View, Text, Pressable } from 'react-native';
 import { Eye, EyeOff } from 'lucide-react-native';
 import { cn } from '@/lib/cn';
+import { useFormScroll } from './FormSheet';
 
 interface InputProps extends Omit<TextInputProps, 'className'> {
   label?: string;
@@ -23,6 +24,14 @@ export const Input = forwardRef<TextInput, InputProps>(function Input(
   const [pwVisible, setPwVisible] = useState(false);
   const secure = isPassword ? !pwVisible : secureTextEntry;
 
+  // Local ref so we can both forward it AND use it for keyboard-aware scrolling.
+  const innerRef = useRef<TextInput>(null);
+  useImperativeHandle(ref, () => innerRef.current as TextInput);
+
+  // If we're inside a FormSheet, register focus so the sheet can scroll us
+  // above the keyboard on Android (iOS handles this natively).
+  const formScroll = useFormScroll();
+
   return (
     <View className={cn('w-full', containerClassName)}>
       {label ? (
@@ -40,10 +49,14 @@ export const Input = forwardRef<TextInput, InputProps>(function Input(
       >
         {leftIcon ? <View className="mr-2">{leftIcon}</View> : null}
         <TextInput
-          ref={ref}
+          ref={innerRef}
           {...props}
           secureTextEntry={secure}
-          onFocus={(e) => { setFocused(true); props.onFocus?.(e); }}
+          onFocus={(e) => {
+            setFocused(true);
+            formScroll?.registerFocus(innerRef.current);
+            props.onFocus?.(e);
+          }}
           onBlur={(e) => { setFocused(false); props.onBlur?.(e); }}
           placeholderTextColor="#94A3B8"
           className={cn('flex-1 py-3 text-base text-ink-900', inputClassName)}
