@@ -2,9 +2,9 @@ import React, {
   createContext, useCallback, useContext, useEffect, useRef, useState,
 } from 'react';
 import {
-  Dimensions, findNodeHandle, Keyboard, KeyboardAvoidingView, Modal,
-  NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable,
-  ScrollView, Text, TextInput, View,
+  Keyboard, KeyboardAvoidingView, Modal, NativeScrollEvent,
+  NativeSyntheticEvent, Platform, Pressable, ScrollView, Text,
+  TextInput, View,
 } from 'react-native';
 import { MotiView, AnimatePresence } from 'moti';
 import { X } from 'lucide-react-native';
@@ -105,19 +105,16 @@ export function FormSheet({
     const sv = scrollRef.current;
     if (!node || !sv) return;
 
-    // Use measureLayout against the ScrollView's content — gives us the
-    // input's Y in *content coordinates*, which scrollTo accepts directly.
-    // measureInWindow gave screen coords which on Android are off by the
-    // status bar inset under statusBarTranslucent.
-    const svHandle = findNodeHandle(sv);
-    if (svHandle == null) return;
-
     // Delay so the keyboard's geometry + the KAV-induced layout shrink are
     // both final before we measure. 200ms is roomy on most Androids.
     setTimeout(() => {
       try {
+        // Fabric (new arch) requires a *ref* as the first arg — passing a
+        // findNodeHandle() number throws "must be called with a ref to a
+        // native component". Passing the ScrollView ref directly works in
+        // both old and new architectures.
         (node as any).measureLayout?.(
-          svHandle,
+          sv,
           (_x: number, y: number, _w: number, h: number) => {
             const viewport = scrollViewportH.current;
             if (!viewport) return;
