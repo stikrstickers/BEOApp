@@ -2,9 +2,9 @@ import React, {
   createContext, useCallback, useContext, useEffect, useRef, useState,
 } from 'react';
 import {
-  Dimensions, Keyboard, KeyboardAvoidingView, Modal, NativeScrollEvent,
-  NativeSyntheticEvent, Platform, Pressable, ScrollView, Text,
-  TextInput, View,
+  Dimensions, findNodeHandle, Keyboard, KeyboardAvoidingView, Modal,
+  NativeScrollEvent, NativeSyntheticEvent, Platform, Pressable,
+  ScrollView, Text, TextInput, View,
 } from 'react-native';
 import { MotiView, AnimatePresence } from 'moti';
 import { X } from 'lucide-react-native';
@@ -63,12 +63,20 @@ export function FormSheet({
 }: FormSheetProps) {
   const scrollRef = useRef<ScrollView>(null);
   const scrollOffset = useRef(0);
+  const scrollViewportH = useRef(0);
   const [kbHeight, setKbHeight] = useState(0);
 
   // Track current scroll position so registerFocus can compute the absolute
   // target Y from the relative measurement.
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     scrollOffset.current = e.nativeEvent.contentOffset.y;
+  }, []);
+
+  // Track the ScrollView's own rendered height. KAV+'height' shrinks the
+  // sheet when the keyboard appears, which shrinks this; we use the new
+  // value as the visible viewport for scroll calculations.
+  const onScrollLayout = useCallback((e: { nativeEvent: { layout: { height: number } } }) => {
+    scrollViewportH.current = e.nativeEvent.layout.height;
   }, []);
 
   // Listen for keyboard show/hide so we know how much screen the keyboard
@@ -96,24 +104,38 @@ export function FormSheet({
     const node = focusedNode.current;
     const sv = scrollRef.current;
     if (!node || !sv) return;
-    // Delay so the keyboard's geometry is final.
+
+    // Use measureLayout against the ScrollView's content — gives us the
+    // input's Y in *content coordinates*, which scrollTo accepts directly.
+    // measureInWindow gave screen coords which on Android are off by the
+    // status bar inset under statusBarTranslucent.
+    const svHandle = findNodeHandle(sv);
+    if (svHandle == null) return;
+
+    // Delay so the keyboard's geometry + the KAV-induced layout shrink are
+    // both final before we measure. 200ms is roomy on most Androids.
     setTimeout(() => {
       try {
-        (node as any).measureInWindow?.((_x: number, y: number, _w: number, h: number) => {
-          const screenH = Dimensions.get('window').height;
-          // Leave some breathing room above the keyboard so the input doesn't
-          // sit flush against the keyboard's top edge.
-          const safeBottom = screenH - kbHeight - 40;
-          if (y + h > safeBottom) {
-            const delta = y + h - safeBottom;
-            sv.scrollTo({ y: scrollOffset.current + delta, animated: true });
-          }
-        });
+        (node as any).measureLayout?.(
+          svHandle,
+          (_x: number, y: number, _w: number, h: number) => {
+            const viewport = scrollViewportH.current;
+            if (!viewport) return;
+            const fieldBottom = y + h;
+            const visibleBottom = scrollOffset.current + viewport;
+            // 40px breathing room above the keyboard.
+            if (fieldBottom > visibleBottom - 40) {
+              const target = Math.max(0, fieldBottom - viewport + 40);
+              sv.scrollTo({ y: target, animated: true });
+            }
+          },
+          () => { /* measure failure — ignore */ },
+        );
       } catch {
         /* noop — measure can fail if the node unmounted */
       }
-    }, 120);
-  }, [kbHeight]);
+    }, 200);
+  }, []);
 
   useEffect(() => {
     if (kbHeight > 0) scrollFocusedIntoView();
@@ -194,6 +216,7 @@ export function FormSheet({
                   <ScrollView
                     ref={scrollRef}
                     onScroll={onScroll}
+                    onLayout={onScrollLayout}
                     scrollEventThrottle={16}
                     keyboardShouldPersistTaps="handled"
                     keyboardDismissMode="interactive"
